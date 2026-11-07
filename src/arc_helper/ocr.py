@@ -723,8 +723,30 @@ class OCREngine:
 
         whitelisted = self.ocr_text(processed, upper=True)
         name_lines = [ln.strip() for ln in whitelisted.split("\n") if ln.strip()]
-        name = self._clean_text(" ".join(name_lines[: len(plain_names)]))
+        name = self._clean_text(
+            " ".join(self._matching_lines(name_lines, plain_names))
+        )
         return self._clean_text(self._merge_numeral(plain_names[-1], name)) or None
+
+    @staticmethod
+    def _matching_lines(lines: list[str], plain_names: list[str]) -> list[str]:
+        """The run of ``lines`` that best matches the plain pass's name lines.
+
+        Icon noise can add a junk line before the name in either pass, so the
+        two passes' lines do not always line up by position.
+        """
+        n = len(plain_names)
+        if len(lines) <= n:
+            return lines
+
+        def flat(parts: list[str]) -> str:
+            return re.sub(r"[^A-Z]", "", " ".join(parts).upper())
+
+        want = flat(plain_names)
+        return max(
+            (lines[i : i + n] for i in range(len(lines) - n + 1)),
+            key=lambda run: SequenceMatcher(None, flat(run), want).ratio(),
+        )
 
     @staticmethod
     def _merge_numeral(plain_name_line: str, upper_text: str) -> str:
@@ -759,12 +781,17 @@ class OCREngine:
         alpha = [c for c in text if c.isalpha()]
         return sum(c.isupper() for c in alpha) / len(alpha) if alpha else 0.0
 
+    # Lines shorter than this before the name are icon noise, not description
+    MAX_LEADING_JUNK = 8
+
     @classmethod
     def _name_lines(cls, text: str) -> list[str]:
         """The leading mostly-uppercase lines that form the item name, raw.
 
         Stops at the first lower-case line (the description), tolerating a
         stray mis-cased character (e.g. "II" read as "Il") via a ratio.
+        Short junk before the name (a tag icon read as "arn") is skipped;
+        the description's first line is far longer.
         Lines are returned uncleaned so a numeral read as "|" survives.
         """
         lines: list[str] = []
@@ -772,7 +799,7 @@ class OCREngine:
             line = cls._clean_text(raw_line)
             if len(line) >= 2 and cls._upper_ratio(line) >= 0.6:
                 lines.append(raw_line.strip())
-            elif lines or len(line) >= 2:
+            elif lines or len(line) >= cls.MAX_LEADING_JUNK:
                 break
         return lines
 

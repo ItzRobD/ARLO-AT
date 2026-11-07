@@ -100,3 +100,21 @@ def test_contains_crafting_word():
     assert hit("WORKBENCH LEVEL CRAFTlNG", "CRAFTING")  # one OCR slip
     assert not hit("INVENTORY INVENTORY LO", "CRAFTING")
     assert not hit("", "CRAFTING")
+
+
+def test_tag_icon_junk_before_name_is_skipped():
+    # Crafting hover tooltip for a quick-use gadget: the tag icon survives
+    # preprocessing as a junk line ("arn" plain, "P" uppercase pass).
+    from arc_helper.ocr import OCREngine
+
+    plain = "arn\nSNAP HOOK\nrs ne Se es | es . a ns a\n"
+    names = OCREngine._name_lines(plain)
+    assert names == ["SNAP HOOK"]
+    assert OCREngine._matching_lines(["P", "SNAPHOOK", "S"], names) == ["SNAPHOOK"]
+
+
+def test_description_line_still_ends_the_name():
+    from arc_helper.ocr import OCREngine
+
+    text = "A gadget that allows the user\nSNAP HOOK\n"
+    assert OCREngine._name_lines(text) == []
