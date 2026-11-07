@@ -11,6 +11,7 @@ import json
 import logging
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -21,6 +22,7 @@ from typing import Any
 
 from arc_helper.arctracker.catalogue import Catalogue
 from arc_helper.arctracker.catalogue import fetch_catalogue
+from arc_helper.arctracker.mcp_client import MAX_CALLS
 from arc_helper.arctracker.mcp_client import ArcTrackerAuthError
 from arc_helper.arctracker.mcp_client import ArcTrackerClient
 from arc_helper.arctracker.mcp_client import redact
@@ -46,7 +48,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 REFRESH_S = 300
-REQUEST_THROTTLE_S = 60
+REQUEST_THROTTLE_S = 180
+# Our own cap on MCP tool calls, under the server's 150 per 10 min: no refresh
+# starts while the last 10 min already hold CALL_WINDOW_MAX calls.
+CALL_WINDOW_S = 600
+CALL_WINDOW_MAX = 100
 BACKOFF_S = (60, 120, 300)
 CATALOGUE_REFRESH_S = 86400
 CATALOGUE_RETRY_S = 3600
@@ -106,6 +112,8 @@ class AdvisorService:
         self._auth_failed = False
         self._last_error: str | None = None
         self._next_catalogue = 0.0
+        self._calls: deque[tuple[float, int]] = deque()  # (start, tool calls)
+        self._no_key_logged = False
 
         self._catalogue: Catalogue | None = None
         self._snapshot: PlayerSnapshot | None = None
@@ -118,10 +126,10 @@ class AdvisorService:
         self._thread: threading.Thread | None = None
 
         if not self._has_key:
-            logger.info(NO_KEY_MSG)
+            return  # no key: never load the catalogue or contact arctracker.io
         # Startup: cached data first, so lookup works offline immediately.
         self._catalogue = _read_cached_catalogue(self._cache_dir / "catalogue.json")
-        if self._has_key and self._snapshot_path.exists():
+        if self._snapshot_path.exists():
             self._snapshot = load_snapshot(self._snapshot_path)
         self._rebuild()
 
@@ -156,19 +164,28 @@ class AdvisorService:
         return verdict, label, stale
 
     def request_refresh(self) -> None:
-        """Ask for fresh personal data. Ignored within 60 s of the last fetch
-        and while backing off after a failure."""
+        """Ask for fresh personal data. Ignored within 180 s of the last fetch,
+        while backing off after a failure, and while the call window is full."""
         with self._lock:
             if not self._has_key or self._auth_failed:
                 return
             now = self._clock()
             last = self._last_fetch
             if last is not None and now - last < REQUEST_THROTTLE_S:
-                return  # data is under a minute old
+                return  # data is under three minutes old
             if self._failures:
                 return  # in backoff: a request never brings the retry forward
+            if self._window_calls(now) >= CALL_WINDOW_MAX:
+                return
             self._next_fetch = min(self._next_fetch, now)
         self._wake.set()
+
+    def _window_calls(self, now: float) -> int:
+        """Tool calls started in the last CALL_WINDOW_S. Caller holds _lock."""
+        calls = self._calls
+        while calls and calls[0][0] <= now - CALL_WINDOW_S:
+            calls.popleft()
+        return sum(n for _, n in calls)
 
     def status(self) -> str:
         if not self._has_key:
@@ -190,6 +207,11 @@ class AdvisorService:
     # -- service thread ----------------------------------------------------
 
     def start(self) -> None:
+        if not self._has_key:
+            if not self._no_key_logged:
+                self._no_key_logged = True
+                logger.info(NO_KEY_MSG)
+            return  # nothing to do: no thread, no network
         if self._thread is not None:
             return
         self._stop.clear()
@@ -216,12 +238,18 @@ class AdvisorService:
 
     def step(self) -> None:
         """One loop tick: catalogue (daily), personal data (when due), rules."""
+        if not self._has_key:
+            return
         now = self._clock()
         if now >= self._next_catalogue:
             self._refresh_catalogue(now)
         if self._client is not None:
             with self._lock:
-                due = not self._auth_failed and now >= self._next_fetch
+                due = (
+                    not self._auth_failed
+                    and now >= self._next_fetch
+                    and self._window_calls(now) < CALL_WINDOW_MAX
+                )
             if due:
                 self._refresh_personal(now)
         self._rebuild()
@@ -250,7 +278,10 @@ class AdvisorService:
     def _refresh_personal(self, now: float) -> None:
         assert self._client is not None
         try:
-            raw = self._client.fetch_raw()
+            try:
+                raw = self._client.fetch_raw()
+            finally:
+                self._record_calls(now)
             snapshot = _snapshot_from_raw(raw, now)
         except ArcTrackerAuthError as exc:
             with self._lock:
@@ -282,6 +313,13 @@ class AdvisorService:
             save_snapshot(snapshot, self._snapshot_path)
         except OSError as exc:
             logger.warning("Cannot write ARC Tracker snapshot cache: %s", exc)
+
+    def _record_calls(self, now: float) -> None:
+        used = getattr(self._client, "calls_made", MAX_CALLS)
+        if not isinstance(used, int) or isinstance(used, bool) or used < 0:
+            used = MAX_CALLS  # unknown: assume the whole budget
+        with self._lock:
+            self._calls.append((now, used))
 
     def _rules(self, catalogue: Catalogue) -> Rules:
         rules = self._rules_watcher.current(catalogue)

@@ -18,8 +18,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger(__name__)
 
-# Tool calls per refresh, paging included. A refresh every 300 s against the
-# server's 150 calls / 10 min limit could afford ~70; 20 leaves ample room.
+# Tool calls per refresh, paging included. The server allows 150 calls per
+# 10 min; service.py also caps its own sliding window at 100.
 MAX_CALLS = 20
 # Per paged tool: the most one tool can use while the other three paged/fixed
 # tools (needs or inventory, tracking, two progress calls) still get one each.
@@ -30,6 +30,8 @@ NEEDS_LIMIT = 30
 TRACKING_LIMIT = 50
 TIMEOUT_S = 30.0
 TOTAL_TIMEOUT_S = 120.0
+# Every tool's input schema accepts `language`; names come back in English.
+LANGUAGE = "en"
 
 
 class ArcTrackerError(Exception):
@@ -76,6 +78,7 @@ class ArcTrackerClient:
         self._key = api_key
         self.url = url
         self._transport = transport  # tests: an httpx2.MockTransport
+        self.calls_made = 0  # tool calls of the last fetch_raw, failed or not
 
     def __repr__(self) -> str:
         return f"ArcTrackerClient(url={self.url!r})"
@@ -83,10 +86,14 @@ class ArcTrackerClient:
     def fetch_raw(self) -> dict[str, Any]:
         """One MCP session; returns the raw tool results (see service.py)."""
         responses: list[tuple[int, str]] = []
+        budget = _Budget(MAX_CALLS)
+        self.calls_made = 0
         try:
-            return asyncio.run(self._fetch(responses))
+            return asyncio.run(self._fetch(responses, budget))
         except Exception as exc:  # noqa: BLE001 - every failure becomes ArcTrackerError
             error_cls, msg = self._classify(exc, responses)
+        finally:
+            self.calls_made = budget.used
         # Raised outside the except block so the original exception (which may
         # quote the key) is neither the __cause__ nor the __context__.
         raise error_cls(msg)
@@ -108,7 +115,9 @@ class ArcTrackerClient:
         text = f"ARC Tracker request failed{http}: {_describe(exc)}"
         return ArcTrackerError, redact(text, self._key)
 
-    async def _fetch(self, responses: list[tuple[int, str]]) -> dict[str, Any]:
+    async def _fetch(
+        self, responses: list[tuple[int, str]], budget: _Budget
+    ) -> dict[str, Any]:
         async def on_response(response: httpx2.Response) -> None:  # noqa: RUF029 - httpx2 async hook
             www_auth = response.headers.get("www-authenticate", "")
             responses.append((response.status_code, www_auth))
@@ -126,12 +135,17 @@ class ArcTrackerClient:
                 ClientSession(read, write) as session,
             ):
                 await session.initialize()
-                return await _collect(session)
+                return await _collect(session, budget)
 
 
 class _Budget:
     def __init__(self, calls: int):
+        self.calls = calls
         self.left = calls
+
+    @property
+    def used(self) -> int:
+        return self.calls - self.left
 
     def spend(self, tool: str) -> None:
         if self.left <= 0:
@@ -144,7 +158,7 @@ class _Budget:
 
 async def _call(session: Any, budget: _Budget, tool: str, args: dict[str, Any]) -> dict:
     budget.spend(tool)
-    result = await session.call_tool(tool, args)
+    result = await session.call_tool(tool, {**args, "language": LANGUAGE})
     content = getattr(result, "content", None) or []
     text = getattr(content[0], "text", None) if content else None
     if getattr(result, "is_error", False):
@@ -198,8 +212,9 @@ async def _pages(
     raise ArcTrackerError(msg)
 
 
-async def _collect(session: Any) -> dict[str, Any]:
-    budget = _Budget(MAX_CALLS)
+async def _collect(session: Any, budget: _Budget | None = None) -> dict[str, Any]:
+    if budget is None:
+        budget = _Budget(MAX_CALLS)
     inventory = await _pages(
         session, budget, "get_my_inventory", {"limit": INVENTORY_LIMIT}
     )

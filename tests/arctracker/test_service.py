@@ -169,10 +169,13 @@ def test_request_refresh_throttled(tmp_path):
     svc = _service(tmp_path, client, clock)
     _run(svc, clock, 100)
     assert client.calls == 1
-    for _ in range(5):  # 5 requests within 60 s
+    for _ in range(5):  # 5 requests within 180 s of the start-up fetch
         svc.request_refresh()
         _run(svc, clock, 10)
-    _run(svc, clock, 30)
+    assert client.calls == 1
+    _run(svc, clock, 30)  # t=180
+    svc.request_refresh()
+    _run(svc, clock, 1)
     assert client.calls == 2
 
 
@@ -184,7 +187,11 @@ def test_request_refresh_soon_after_fetch_is_ignored(tmp_path):
     svc.request_refresh()  # 10 s after the start-up fetch
     _run(svc, clock, 100)
     assert client.calls == 1
-    svc.request_refresh()  # 110 s after it
+    svc.request_refresh()  # 110 s after it: still inside the 180 s throttle
+    _run(svc, clock, 1)
+    assert client.calls == 1
+    _run(svc, clock, 70)
+    svc.request_refresh()  # 181 s after it
     _run(svc, clock, 1)
     assert client.calls == 2
 
@@ -231,6 +238,8 @@ def test_no_key_means_no_lookup(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         svc = _service(tmp_path, client, key=None)
         svc.step()
+        svc.start()
+        svc.start()
     assert svc.lookup("CANISTER") is None
     assert client.calls == 0
     msg = "ARC Tracker: no API key; using generic item database"
@@ -324,7 +333,7 @@ def test_request_refresh_works_again_after_recovery(tmp_path):
     svc = _service(tmp_path, client, clock)
     _run(svc, clock, 361)  # ok at 0, fail at 300, ok at 360
     assert client.calls == 3
-    _run(svc, clock, 60)
+    _run(svc, clock, 180)
     svc.request_refresh()
     _run(svc, clock, 1)
     assert client.calls == 4
@@ -352,3 +361,71 @@ def test_raising_catalogue_loader_is_throttled_and_fetch_still_runs(tmp_path, ca
     failures = [r for r in caplog.records if "catalogue load failed" in r.getMessage()]
     assert len(failures) == 2
     assert all(r.exc_info is None for r in failures)
+
+
+def test_no_key_never_loads_catalogue_or_contacts_server(tmp_path):
+    loads = []
+
+    def loader(*a, **k):
+        loads.append((a, k))
+
+    _write_catalogue_cache(tmp_path)
+    client = FakeClient()
+    clock = Clock()
+    svc = AdvisorService(
+        _settings(tmp_path, key=None),
+        client=client,
+        clock=clock,
+        catalogue_loader=loader,
+    )
+    svc.start()
+    assert svc._thread is None  # noqa: SLF001 - no service thread without a key
+    _run(svc, clock, 3 * 86400 // 100)
+    svc.request_refresh()
+    svc.step()
+    svc.stop()
+    assert loads == []
+    assert client.calls == 0
+    assert svc._catalogue is None  # noqa: SLF001 - cache not even parsed
+
+
+class CountingClient(FakeClient):
+    """Reports `calls_made` tool calls per fetch, like ArcTrackerClient."""
+
+    def __init__(self, per_fetch=20, **kw):
+        super().__init__(**kw)
+        self.per_fetch = per_fetch
+        self.calls_made = 0
+
+    def fetch_raw(self):
+        self.calls_made = self.per_fetch
+        return super().fetch_raw()
+
+
+def _max_window(times, per_fetch, window=600):
+    return max(
+        (sum(per_fetch for u in times if t - window < u <= t) for t in times),
+        default=0,
+    )
+
+
+def test_request_refresh_never_exceeds_call_window(tmp_path):
+    clock = Clock()
+    client = CountingClient(per_fetch=20)
+    svc = _service(tmp_path, client, clock)
+    times = _fetch_times(svc, client, clock, 7200, every=1)  # ask every second
+    assert len(times) > 20
+    assert _max_window(times, 20) <= 100
+
+
+def test_scheduled_refresh_waits_for_window_room(tmp_path, monkeypatch):
+    from arc_helper.arctracker import service
+
+    monkeypatch.setattr(service, "REFRESH_S", 30)  # would be 400 calls / 10 min
+    clock = Clock()
+    client = CountingClient(per_fetch=20)
+    svc = _service(tmp_path, client, clock)
+    times = _fetch_times(svc, client, clock, 3600)
+    assert _max_window(times, 20) <= 100
+    assert times[:5] == [0, 30, 60, 90, 120]
+    assert times[5] == 600  # window full until the t=0 calls age out

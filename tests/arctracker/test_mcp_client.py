@@ -184,3 +184,22 @@ def test_transport_error_with_key_is_redacted():
         assert KEY not in str(e)
         assert KEY not in repr(e)
         assert KEY not in repr(e.args)
+
+
+def test_every_tool_call_passes_language_en():
+    _raw, session = _collect(_ok)
+    assert all(args.get("language") == "en" for _tool, args in session.calls)
+
+
+def test_budget_counts_calls_made():
+    budget = mcp_client._Budget(mcp_client.MAX_CALLS)  # noqa: SLF001
+    session = FakeSession(_ok)
+    asyncio.run(mcp_client._collect(session, budget))  # noqa: SLF001
+    assert budget.used == len(session.calls) == 7
+
+
+def test_client_reports_calls_made_on_failure():
+    client = _client(lambda _request: httpx2.Response(500, text="down"))
+    with pytest.raises(ArcTrackerError):
+        client.fetch_raw()
+    assert client.calls_made == 0  # failed before any tool call
