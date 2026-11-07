@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import Field
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
@@ -195,8 +196,15 @@ class OverlaySettings(BaseSettings):
         extra="ignore",
     )
 
-    x: int = Field(default=100, description="Overlay X position")
-    y: int = Field(default=100, description="Overlay Y position")
+    x: int = Field(default=100, description="Overlay X position (anchor=fixed)")
+    y: int = Field(default=100, description="Overlay Y position (anchor=fixed)")
+    anchor: str = Field(
+        default="tooltip",
+        description="tooltip: beside the game's tooltip; fixed: at OVERLAY_X/Y",
+    )
+    scale: float = Field(
+        default=1.0, ge=0.5, le=4.0, description="Popup size multiplier"
+    )
     display_time: float = Field(
         default=4.0, description="How long overlay stays visible"
     )
@@ -217,7 +225,7 @@ class ScanSettings(BaseSettings):
         default=0.5, description="Seconds between trigger scans"
     )
     tooltip_scan_interval: float = Field(
-        default=0.3, description="Seconds between tooltip scans"
+        default=0.1, description="Seconds between tooltip scans"
     )
 
 
@@ -246,6 +254,12 @@ class Settings(BaseSettings):
     # Database in app directory
     database_path: Path = Field(default_factory=lambda: APP_DIR / "items.db")
 
+    # How to find the item tooltip: frame (search the whole screen for it)
+    # or cursor (fixed box at TOOLTIP_CAPTURE_* offsets from the cursor)
+    tooltip_detection: str = Field(
+        default="frame", description="Tooltip detection: frame or cursor"
+    )
+
     # Screen capture backend: auto | x11 | wayland (Linux only)
     screen_backend: str = Field(
         default="auto", description="Screen backend: auto, x11 or wayland"
@@ -255,6 +269,14 @@ class Settings(BaseSettings):
     hotkey_key: str = Field(
         default="KEY_RIGHTCTRL", description="evdev key name for hold-to-scan"
     )
+
+    # ARC Tracker integration
+    arctracker_api_key: SecretStr | None = Field(
+        default=None, description="ARC Tracker developer access key"
+    )
+    arctracker_mcp_url: str = Field(default="https://mcp.arctracker.io/mcp")
+    rules_path: Path = Field(default_factory=lambda: APP_DIR / "rules.yaml")
+    arctracker_cache_dir: Path = Field(default_factory=lambda: APP_DIR / "cache")
 
     # Debug settings
     debug_mode: bool = Field(default=False, description="Enable debug mode")
@@ -295,6 +317,9 @@ class Settings(BaseSettings):
             f"OVERLAY_Y={self.overlay.y}",
             f"OVERLAY_DISPLAY_TIME={self.overlay.display_time}",
             f"OVERLAY_COOLDOWN={self.overlay.cooldown}",
+            f"OVERLAY_ANCHOR={self.overlay.anchor}",
+            f"OVERLAY_SCALE={self.overlay.scale}",
+            f"TOOLTIP_DETECTION={self.tooltip_detection}",
             "",
             "# Scan intervals",
             f"TRIGGER_SCAN_INTERVAL={self.scan.trigger_scan_interval}",

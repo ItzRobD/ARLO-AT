@@ -1,0 +1,34 @@
+# Copy to rules.yaml and edit; rules.yaml is gitignored.
+# Keys are ARC Tracker item ids. All numbers below are illustrative.
+
+# Plain counts: keep at least `min`, aim for `ideal`.
+heavy_gun_parts: {min: 8, ideal: 30}
+# A single exact count.
+wires: {target: 25}
+# Rows (4 stacks each) and stacks, scaled by the item's stack size.
+zipline: {rows: 2}
+duct_tape: {stacks: [2, 3]}     # a range: min 2 stacks, ideal 3
+# Tier 4..6 marks how much the item matters (default 5).
+trigger_nade: {stacks: 1, tier: 6}
+# Actions: keep | sell | recycle | buy_on_demand | consume, with an optional note.
+bandage: {action: keep, note: Cheap healing for every raid}
+cooling_coil: {action: recycle, note: Only useful as scrap}
+battery: {action: sell}
+medium_ammo: {action: buy_on_demand}
+# Research items: hand spares in at the Research Station (needs still win).
+battered_paperback: {action: consume}
+# Override the automatic category (weapons, consumables, medical, crafting, base, arc_rare).
+rubber_pad: {target: 12, category: base}
+
+# Loadout groups: the verdict keeps `copies` of each listed item.
+loadout:
+  weapons:
+    items: [aphelion_amplified, kettle_amplified]
+    copies: 2
+  shields:
+    items: [light_shield]
+    copies: 1
+
+# Keep keys of these rarities.
+keys:
+  keep_rarities: [Epic, Legendary]

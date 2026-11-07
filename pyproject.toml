@@ -3,7 +3,7 @@ name = "arlo"
 version = "0.1.1"
 description = "Item recommendation overlay for Arc Raiders"
 readme = "README.md"
-requires-python = ">=3.11,<3.14"
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "pytesseract>=0.3.10",
     "pillow>=10.0.0",
@@ -17,6 +17,10 @@ dependencies = [
     "pynput>=1.7.0",
     "evdev>=1.6; sys_platform == 'linux'",
     "python-xlib>=0.17; sys_platform == 'linux'",
+    "pyyaml>=6.0",
+    "mcp>=2.3",
+    "anyio>=4.0",
+    "httpx2>=2.16",
 ]
 
 [project.optional-dependencies]
@@ -159,3 +163,9 @@ testpaths = ["tests"]
 name = "pygobject"
 requires-dist = ["pycairo>=1.16"]
 requires-python = ">=3.9"
+
+[tool.uv]
+# uv's bundled (python-build-standalone) Tk lacks Xft on Linux: no
+# antialiased fonts and none of the system font families. Prefer the
+# distro Python so the overlay renders properly.
+python-preference = "system"

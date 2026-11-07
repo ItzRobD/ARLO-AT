@@ -3,8 +3,11 @@ OCR module for ARLO.
 Screen capture and text extraction using Tesseract.
 """
 
+import atexit
+import hashlib
 import re
 import string
+import time
 
 import numpy as np
 import pytesseract
@@ -19,6 +22,28 @@ from .config import logger
 from .screen import Point
 from .screen import ScreenCaptureUnavailable
 from .screen import get_backend
+from .tess_api import PSM_SINGLE_BLOCK
+from .tess_api import PSM_SINGLE_LINE
+from .tess_api import TessApi
+from .tooltip_finder import find_tooltip
+
+# A plain-pass token that is only Roman numeral look-alikes ("|", "Il", "lV")
+_NUMERAL_TOKEN = re.compile(r"[|l1!IiV]+")
+
+
+def grab_frame_array(width: int, height: int) -> np.ndarray:
+    """Whole captured monitor as an HxWx3 RGB array (a view when possible)."""
+    backend = get_backend()
+    frame_array = getattr(backend, "frame_array", None)
+    if frame_array is not None:
+        return frame_array()
+    return np.asarray(grab_screen((0, 0, width, height)))
+
+
+def _bbox_close(
+    a: tuple[int, int, int, int], b: tuple[int, int, int, int], tol: int
+) -> bool:
+    return all(abs(x - y) <= tol for x, y in zip(a, b, strict=True))
 
 
 def grab_screen(bbox: tuple[int, int, int, int]) -> Image.Image:
@@ -70,6 +95,35 @@ class OCREngine:
         self.tooltip_offset_x = settings.tooltip_capture.offset_x
         self.tooltip_offset_y = settings.tooltip_capture.offset_y
 
+        self.detection = settings.tooltip_detection.lower()
+
+        # In-process Tesseract (falls back to pytesseract when unavailable)
+        self._tess_plain = TessApi.create(tesseract_cmd=settings.tesseract_path)
+        self._tess_upper = TessApi.create(
+            string.ascii_uppercase, tesseract_cmd=settings.tesseract_path
+        )
+        if self._tess_plain and self._tess_upper:
+            logger.info("OCR: using in-process libtesseract")
+            atexit.register(self._tess_plain.close)
+            atexit.register(self._tess_upper.close)
+        else:
+            logger.info("OCR: using the tesseract binary (pytesseract)")
+
+        # Frame mode state: the tooltip must hold still for two scans before
+        # it is read (the game animates it in), and an unchanged tooltip is
+        # not OCR'd again.
+        self._prev_bbox: tuple[int, int, int, int] | None = None
+        # Last bbox that passed the stability check; a scan close to it is
+        # the same settled tooltip even if it differs from the previous scan
+        self._accepted_bbox: tuple[int, int, int, int] | None = None
+        self._last_jitter_log = float("-inf")
+        self._cache_key: tuple | None = None
+        self._cache_name: str | None = None
+
+        # Physical-pixel bbox of the last tooltip found by frame detection;
+        # read (atomically) by the GUI thread to anchor the popup.
+        self.last_tooltip_bbox: tuple[int, int, int, int] | None = None
+
         if self.debug_mode:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
 
@@ -96,6 +150,9 @@ class OCREngine:
 
         cursor = get_cursor_position()
         screen_width, screen_height = get_screen_resolution()
+        if self.debug_mode:
+            logger.debug(f"Cursor (physical, game monitor): ({cursor.x}, {cursor.y})")
+            self._maybe_save_full_frame(screen_width, screen_height)
 
         # TODO: flipping the tooltip region on the right side of screen
         # to be implemented properly
@@ -143,6 +200,17 @@ class OCREngine:
             return Image.new("RGB", (100, 100), color="black"), cursor
 
         return image, cursor
+
+    def _maybe_save_full_frame(self, width: int, height: int) -> None:
+        """Debug aid: save the whole game monitor every few seconds."""
+        now = time.monotonic()
+        if now - getattr(self, "_last_full_frame", 0.0) < 3.0:
+            return
+        self._last_full_frame = now
+        try:
+            grab_screen((0, 0, width, height)).save(self.debug_dir / "full_frame.png")
+        except OSError as e:
+            logger.debug(f"Full-frame debug capture failed: {e}")
 
     def check_trigger_any(self, regions: list[RegionMixin]) -> bool:
         """
@@ -383,9 +451,8 @@ class OCREngine:
             processed.save(self.debug_dir / "trigger_processed.png")
 
         # Extract with limited whitelist for speed using image_to_string (faster than image_to_data)
-        config = f'--psm 7 -c tessedit_char_whitelist="{string.ascii_uppercase}"'
         try:
-            text = pytesseract.image_to_string(processed, config=config)
+            text = self.ocr_text(processed, psm=PSM_SINGLE_LINE, upper=True)
             if text:
                 # Fuzzy match - allow for some OCR errors
                 return self._fuzzy_match(text.strip().upper(), self.TRIGGER_WORD)
@@ -393,6 +460,117 @@ class OCREngine:
             pass
 
         return False
+
+    # Share of the tooltip body (from the top) that is OCR'd: the name and
+    # the first description line, which ends the name block. Skipping the
+    # rest cuts Tesseract time by about a quarter.
+    TOOLTIP_READ_FRAC = 0.5
+
+    def read_hovered_item_name(self) -> str | None:
+        """Read the hovered item's name using the configured detection mode."""
+        if self.detection == "cursor":
+            self.last_tooltip_bbox = None
+            return self.extract_item_name_at_cursor()
+        return self.extract_item_name_from_frame()
+
+    # Max movement (physical px) between scans for a tooltip to count as
+    # settled rather than still animating in.
+    STABLE_TOLERANCE_PX = 6
+    # Max movement from the last accepted (settled) bbox that still counts
+    # as the same tooltip. find_tooltip samples every 4th pixel, so what is
+    # behind the tooltip can flip an edge between two values 8 px apart.
+    ACCEPTED_TOLERANCE_PX = 12
+
+    def ocr_text(
+        self, image: Image.Image, *, psm: int = PSM_SINGLE_BLOCK, upper: bool = False
+    ) -> str:
+        """OCR an image, optionally restricted to A-Z."""
+        api = self._tess_upper if upper else self._tess_plain
+        if api is not None:
+            return api.image_to_string(image, psm)
+        config = f"--psm {psm}"
+        if upper:
+            config += f" -c tessedit_char_whitelist={string.ascii_uppercase}"
+        return pytesseract.image_to_string(image, config=config)
+
+    def extract_item_name_from_frame(self) -> str | None:
+        """Find the tooltip anywhere on the game monitor and read its name.
+
+        Returns None (and clears last_tooltip_bbox) while no tooltip is
+        visible or while it is still moving.
+        """
+        width, height = get_screen_resolution()
+        try:
+            frame = grab_frame_array(width, height)
+        except ScreenCaptureUnavailable:
+            raise
+        except OSError as e:
+            logger.error(f"Full-frame grab failed: {e}")
+            return None
+
+        bbox = find_tooltip(frame)
+        prev, self._prev_bbox = self._prev_bbox, bbox
+        accepted = self._accepted_bbox
+        stable = bbox is not None and (
+            (prev is not None and _bbox_close(bbox, prev, self.STABLE_TOLERANCE_PX))
+            or (
+                accepted is not None
+                and _bbox_close(bbox, accepted, self.ACCEPTED_TOLERANCE_PX)
+            )
+        )
+        if not stable:
+            self._accepted_bbox = None
+            self.last_tooltip_bbox = None  # gone, or still animating in
+            return None
+        self._log_bbox_jitter(accepted, bbox)
+        self._accepted_bbox = self.last_tooltip_bbox = bbox
+
+        left, top, right, bottom = bbox
+        pad = 8
+        read_bottom = top + int((bottom - top) * self.TOOLTIP_READ_FRAC)
+        region = frame[
+            max(0, top - pad) : min(height, read_bottom),
+            max(0, left - pad) : min(width, right + pad),
+        ]
+        # Same tooltip as last time (position and pixels): reuse the name
+        key = (bbox, hashlib.blake2b(region[::4, ::4].tobytes(), digest_size=16).digest())
+        if key == self._cache_key:
+            return self._cache_name
+
+        image = Image.fromarray(np.ascontiguousarray(region), "RGB")
+        if self.debug_mode:
+            logger.debug(f"Tooltip found at {bbox}")
+            image.save(self.debug_dir / "tooltip_capture_raw.png")
+            self._maybe_save_full_frame(width, height)
+
+        processed = self.preprocess_tooltip(image)
+        if self.debug_mode:
+            processed.save(self.debug_dir / "tooltip_capture_processed.png")
+        try:
+            item_name = self._read_item_name(processed)
+        except pytesseract.TesseractError as e:
+            logger.error(f"OCR Error: {e}")
+            return None
+        self._cache_key, self._cache_name = key, item_name
+        if item_name:
+            logger.debug(f"Extracted item name: '{item_name}'")
+        return item_name
+
+    def _log_bbox_jitter(
+        self,
+        old: tuple[int, int, int, int] | None,
+        new: tuple[int, int, int, int],
+    ) -> None:
+        """Debug aid: note a settled tooltip's bbox moving within tolerance
+        (at most once a second), so jitter reports come with data."""
+        if not self.debug_mode or old is None or old == new:
+            return
+        now = time.monotonic()
+        if now - self._last_jitter_log < 1.0:
+            return
+        self._last_jitter_log = now
+        delta = tuple(n - o for n, o in zip(new, old, strict=True))
+        logger.debug(f"Tooltip bbox jitter: {old} -> {new} (delta {delta})")
 
     def extract_item_name_at_cursor(self) -> str | None:
         """
@@ -444,19 +622,44 @@ class OCREngine:
         intact - a plain pass reads "II" as "Il" or drops it to "I", which
         silently selects the wrong item tier.
         """
-        plain = pytesseract.image_to_string(processed, config="--psm 6")
+        plain = self.ocr_text(processed)
         logger.debug(f"Raw tooltip OCR:\n{plain}")
 
-        line_count = self._count_name_lines(plain)
-        if line_count == 0:
+        plain_names = self._name_lines(plain)
+        if not plain_names:
             return None
 
-        whitelisted = pytesseract.image_to_string(
-            processed,
-            config=f"--psm 6 -c tessedit_char_whitelist={self.NAME_WHITELIST}",
-        )
+        whitelisted = self.ocr_text(processed, upper=True)
         name_lines = [ln.strip() for ln in whitelisted.split("\n") if ln.strip()]
-        return self._clean_text(" ".join(name_lines[:line_count])) or None
+        name = self._clean_text(" ".join(name_lines[: len(plain_names)]))
+        return self._clean_text(self._merge_numeral(plain_names[-1], name)) or None
+
+    @staticmethod
+    def _merge_numeral(plain_name_line: str, upper_text: str) -> str:
+        """Restore a tier numeral the uppercase pass dropped.
+
+        A lone "I" in a bold title often vanishes from the whitelisted pass
+        ("TEMPEST I" reads as "TEMPEST"), while the plain pass keeps it as a
+        look-alike ("TEMPEST |"). When the plain line ends in a separate
+        numeral-like token and the uppercase text ends in a shorter numeral
+        run, replace that run with the normalised numeral. A longer or equal
+        run is kept: the plain pass is the one that drops "II" to "I".
+        """
+        tokens = plain_name_line.split()
+        if len(tokens) < 2 or not _NUMERAL_TOKEN.fullmatch(tokens[-1]):
+            return upper_text
+        numeral = "".join("V" if c == "V" else "I" for c in tokens[-1])
+
+        def tail(text: str) -> int:
+            return len(text) - len(text.rstrip("IV"))
+
+        upper = upper_text.rstrip()
+        # Numeral-like letters that end the name word itself ("TAXI")
+        word_tail = tail(re.sub(r"[^A-Z]", "", tokens[-2].upper()))
+        run = max(0, tail(upper) - word_tail)
+        if run >= len(numeral):
+            return upper_text
+        return f"{upper[: len(upper) - run].rstrip()} {numeral}"
 
     @staticmethod
     def _upper_ratio(text: str) -> float:
@@ -465,22 +668,26 @@ class OCREngine:
         return sum(c.isupper() for c in alpha) / len(alpha) if alpha else 0.0
 
     @classmethod
-    def _count_name_lines(cls, text: str) -> int:
-        """Count the leading mostly-uppercase lines that form the item name.
+    def _name_lines(cls, text: str) -> list[str]:
+        """The leading mostly-uppercase lines that form the item name, raw.
 
         Stops at the first lower-case line (the description), tolerating a
         stray mis-cased character (e.g. "II" read as "Il") via a ratio.
+        Lines are returned uncleaned so a numeral read as "|" survives.
         """
-        count = 0
-        started = False
+        lines: list[str] = []
         for raw_line in text.split("\n"):
             line = cls._clean_text(raw_line)
             if len(line) >= 2 and cls._upper_ratio(line) >= 0.6:
-                count += 1
-                started = True
-            elif started or len(line) >= 2:
+                lines.append(raw_line.strip())
+            elif lines or len(line) >= 2:
                 break
-        return count
+        return lines
+
+    @classmethod
+    def _count_name_lines(cls, text: str) -> int:
+        """Count the leading mostly-uppercase lines that form the item name."""
+        return len(cls._name_lines(text))
 
     def parse_item_name_from_tooltip(self, text: str) -> str | None:
         """

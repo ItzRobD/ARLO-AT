@@ -63,6 +63,16 @@ class ScreenBackend(Protocol):
         """
         ...
 
+    @property
+    def tk_origin(self) -> tuple[int, int]:
+        """tkinter/X11 coordinates of the captured monitor's top-left corner.
+
+        Physical (stream) position p maps to tk position origin + p / tk_scale.
+        Non-zero when the captured monitor is not at the X11 root origin
+        (multi-monitor Wayland setups).
+        """
+        ...
+
 
 def choose_backend_name(
     platform: str, environ: Mapping[str, str], override: str = "auto"
@@ -76,6 +86,43 @@ def choose_backend_name(
     if environ.get("WAYLAND_DISPLAY") or environ.get("XDG_SESSION_TYPE") == "wayland":
         return "wayland"
     return "x11"
+
+
+class MonitorGeometry(BaseModel):
+    """An X11/XWayland monitor rectangle, in X11 root-window coordinates."""
+
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    primary: bool = False
+
+
+def pick_monitor(
+    monitors: list[MonitorGeometry],
+    connector: str | None,
+    stream_size: tuple[int, int],
+) -> MonitorGeometry | None:
+    """Find the X11 monitor that the portal stream is capturing.
+
+    Prefers the connector name the portal reports (e.g. "DP-2"); otherwise a
+    monitor with the stream's exact size (XWayland in physical pixels), then
+    the primary monitor. Returns None if there is nothing to choose from.
+    """
+    if not monitors:
+        return None
+    if connector:
+        for m in monitors:
+            if m.name == connector:
+                return m
+    same_size = [m for m in monitors if (m.width, m.height) == stream_size]
+    if len(same_size) == 1:
+        return same_size[0]
+    for m in monitors:
+        if m.primary:
+            return m
+    return monitors[0] if len(monitors) == 1 else None
 
 
 def compute_scale(physical_width: int, logical_width: int) -> float:

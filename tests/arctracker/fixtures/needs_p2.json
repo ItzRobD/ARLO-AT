@@ -1,0 +1,1 @@
+{"asOf":"2026-11-07T16:22:07.510Z","ownedFrom":{"mode":"stash","stashReadAt":"2026-11-07T05:23:00.117Z"},"groups":[{"kind":"project","id":"weather_monitor_system","name":"Weather Monitor System","items":[{"id":"canister","name":"Canister","needed":5,"owned":10,"missing":0}]}],"returned":1}

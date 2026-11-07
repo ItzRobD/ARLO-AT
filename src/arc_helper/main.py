@@ -18,7 +18,11 @@ from threading import Thread
 
 from dotenv import load_dotenv
 
+from arc_helper.arctracker import AdvisorService
+from arc_helper.arctracker.verdict import Verdict
+from arc_helper.arctracker.verdict import VerdictKind
 from arc_helper.clickthrough import make_click_through
+from arc_helper.clickthrough import make_outline
 from arc_helper.config import APP_DIR
 from arc_helper.config import SettingsManager
 from arc_helper.config import get_settings
@@ -57,9 +61,10 @@ class DebugOverlay:
         self.window = tk.Toplevel(root)
         self.window.title("Capture Area")
         self.window.attributes("-topmost", True)  # noqa: FBT003
-        self.window.attributes("-alpha", 0.3)  # Semi-transparent
+        self.window.attributes("-alpha", 0.3)  # ignored by KWin; see make_outline
         self.window.overrideredirect(boolean=True)
         self.window.config(bg="red")
+        self._shaped_size: tuple[int, int] | None = None
         make_click_through(self.window)
 
         # Update position periodically
@@ -70,15 +75,35 @@ class DebugOverlay:
         try:
             from arc_helper.ocr import get_cursor_position
             from arc_helper.screen import phys_to_tk
+            from arc_helper.screen import phys_to_tk_pos
 
-            cursor = get_cursor_position()
-
-            x = phys_to_tk(cursor.x + self.settings.tooltip_capture.offset_x)
-            y = phys_to_tk(cursor.y + self.settings.tooltip_capture.offset_y)
-            w = phys_to_tk(self.settings.tooltip_capture.width)
-            h = phys_to_tk(self.settings.tooltip_capture.height)
+            if self.settings.tooltip_detection.lower() != "cursor":
+                # Frame mode: outline the tooltip that was actually found
+                bbox = get_ocr_engine().last_tooltip_bbox
+                if bbox is None:
+                    self.window.withdraw()
+                    self.root.after(50, self._update_position)
+                    return
+                self.window.deiconify()
+                left, top, right, bottom = bbox
+                x, y = phys_to_tk_pos(left, top)
+                w, h = phys_to_tk(right - left), phys_to_tk(bottom - top)
+            else:
+                cursor = get_cursor_position()
+                x, y = phys_to_tk_pos(
+                    cursor.x + self.settings.tooltip_capture.offset_x,
+                    cursor.y + self.settings.tooltip_capture.offset_y,
+                )
+                w = phys_to_tk(self.settings.tooltip_capture.width)
+                h = phys_to_tk(self.settings.tooltip_capture.height)
 
             self.window.geometry(f"{w}x{h}+{x}+{y}")
+            if self._shaped_size != (w, h):
+                # Hollow box: a solid one would cover (and be captured
+                # instead of) the tooltip it is meant to show.
+                make_outline(self.window, w, h)
+                make_click_through(self.window)
+                self._shaped_size = (w, h)
         except Exception:  # noqa: BLE001
             pass
 
@@ -118,6 +143,8 @@ class Scanner:
     state: ScannerState = ScannerState.IDLE
     stats: ScannerStats = field(default_factory=ScannerStats)
     hotkey: HotkeyMonitor = field(default_factory=get_hotkey_monitor)
+    # Personal verdicts from ARC Tracker; None (or no data) -> generic db
+    advisor: AdvisorService | None = None
 
     # UI updates are posted here for the main (GUI) thread to apply. tkinter
     # is not thread-safe, and on Linux/Tcl root.after() called from this
@@ -128,7 +155,10 @@ class Scanner:
     # Cooldown tracking
     _last_shown_item: str = ""
     _last_shown_time: float = 0
-    _trigger_check_counter: int = 0
+    _last_trigger_check: float = 0.0
+    _overlay_visible: bool = False
+    # Item lookups by OCR'd name (frame mode re-shows every scan)
+    _lookup_cache: dict = field(default_factory=dict)
 
     # Hotkey override (Ctrl+Shift to force tooltip scanning)
     _hotkey_override: bool = False
@@ -201,6 +231,8 @@ class Scanner:
                         self.state = ScannerState.ACTIVE
                         self._update_status("active")
                         logger.info("INVENTORY detected - activating tooltip scanner")
+                        if self.advisor is not None:
+                            self.advisor.request_refresh()  # throttled
                     else:
                         # Wait before next trigger scan
                         time.sleep(settings.scan.trigger_scan_interval)
@@ -215,28 +247,37 @@ class Scanner:
                             self._hotkey_override = False
                             self.state = ScannerState.IDLE
                             self._update_status("scanning")
+                            self._hide_overlay()
                             logger.info("Hotkey released - returning to idle")
                             continue
                     else:
-                        # Inventory mode: check trigger every 3rd scan
-                        self._trigger_check_counter += 1
-                        should_check_trigger = self._trigger_check_counter % 3 == 0
-
+                        # Inventory mode: re-check the trigger on a timer
+                        # (it costs an OCR call; tooltip scans are cheaper)
+                        now = time.monotonic()
+                        should_check_trigger = (
+                            now - self._last_trigger_check
+                            >= settings.scan.trigger_scan_interval
+                        )
+                        if should_check_trigger:
+                            self._last_trigger_check = now
                         if should_check_trigger and not ocr.check_trigger_any(
                             [settings.trigger_region, settings.trigger_region2]
                         ):
                             # Inventory closed, go back to idle
                             self.state = ScannerState.IDLE
                             self._update_status("scanning")
+                            self._hide_overlay()
                             logger.info("INVENTORY closed - returning to idle")
                             continue
 
-                    # Scan tooltip at cursor position
-                    item_name = ocr.extract_item_name_at_cursor()
+                    item_name = ocr.read_hovered_item_name()
                     self.stats.tooltip_scans += 1
 
                     if item_name:
                         self._handle_detected_item(item_name)
+                    elif ocr.detection != "cursor" and ocr.last_tooltip_bbox is None:
+                        # Tooltip closed (or another one animating in)
+                        self._hide_overlay()
 
                     # Wait before next tooltip scan
                     time.sleep(settings.scan.tooltip_scan_interval)
@@ -255,6 +296,17 @@ class Scanner:
         """Handle a detected item name."""
         settings = get_settings()
         current_time = time.time()
+        ocr = get_ocr_engine()
+
+        if ocr.detection != "cursor" and item_name == self._last_shown_item:
+            # Frame mode: the tooltip is still up, so keep the popup up
+            # (an unchanged popup only repositions and extends its timer).
+            if self._show_verdict(item_name, ocr.last_tooltip_bbox) is None:
+                self._show_overlay(
+                    item_name, self._db_lookup(item_name), ocr.last_tooltip_bbox
+                )
+            self._last_shown_time = current_time
+            return
 
         # Check cooldown - don't spam the same item
         if (
@@ -267,8 +319,21 @@ class Scanner:
         self.stats.last_item = item_name
         self.stats.last_item_time = current_time
 
-        # Look up in database
-        recommendation = self.db.lookup(item_name)
+        # Personal verdict first; the generic database is the fallback only
+        # without personal data (with it, an unresolved name shows Unknown)
+        verdict = self._show_verdict(item_name, ocr.last_tooltip_bbox)
+        if verdict is not None:
+            if verdict.kind is VerdictKind.UNKNOWN:
+                logger.debug(f"Not in ARC Tracker data: {item_name}")
+                self.db.log_missing_item(item_name)
+            else:
+                self.stats.items_found_in_db += 1  # a resolved item is found
+                logger.debug(f"Verdict: {item_name}")
+            self._last_shown_item = item_name
+            self._last_shown_time = current_time
+            return
+
+        recommendation = self._db_lookup(item_name)
 
         if recommendation:
             self.stats.items_found_in_db += 1
@@ -278,16 +343,54 @@ class Scanner:
             # Log to missing items file for easier database updates
             self.db.log_missing_item(item_name)
 
-        # Show overlay (must be done on main thread)
-        self._show_overlay(item_name, recommendation)
+        # Show overlay (must be done on main thread), beside the tooltip
+        self._show_overlay(item_name, recommendation, ocr.last_tooltip_bbox)
 
         # Update cooldown tracking
         self._last_shown_item = item_name
         self._last_shown_time = current_time
 
-    def _show_overlay(self, item_name: str, recommendation: Item | None) -> None:
+    def _db_lookup(self, item_name: str) -> Item | None:
+        """Generic database lookup, memoised by OCR'd name."""
+        if item_name not in self._lookup_cache:
+            self._lookup_cache[item_name] = self.db.lookup(item_name)
+        return self._lookup_cache[item_name]
+
+    def _show_verdict(
+        self, item_name: str, anchor: tuple[int, int, int, int] | None
+    ) -> Verdict | None:
+        """Queue the personal verdict and return it; None when there is none.
+
+        The advisor memoises verdicts per data set, so calling this every
+        frame-mode scan is cheap, and the overlay skips the redraw while
+        (item, verdict, age, stale) is unchanged.
+        """
+        if self.advisor is None:
+            return None
+        res = self.advisor.lookup(item_name)
+        if res is None:
+            return None
+        verdict, age, stale = res
+        self._overlay_visible = True
+        self.ui_queue.put(("verdict", item_name, verdict, age, stale, anchor))
+        return verdict
+
+    def _show_overlay(
+        self,
+        item_name: str,
+        recommendation: Item | None,
+        anchor: tuple[int, int, int, int] | None = None,
+    ) -> None:
         """Queue an overlay update for the main (GUI) thread to apply."""
-        self.ui_queue.put(("overlay", item_name, recommendation))
+        self._overlay_visible = True
+        self.ui_queue.put(("overlay", item_name, recommendation, anchor))
+
+    def _hide_overlay(self) -> None:
+        """Queue hiding the popup (once) for the main thread."""
+        if self._overlay_visible:
+            self._overlay_visible = False
+            self._last_shown_item = ""
+            self.ui_queue.put(("hide",))
 
     def _update_status(self, status: str) -> None:
         """Queue a status update for the main (GUI) thread to apply."""
@@ -304,6 +407,9 @@ class Application:
 
         # Initialize database
         self.db = get_database()
+
+        # Personal verdicts (no-op without ARCTRACKER_API_KEY)
+        self.advisor = AdvisorService(get_settings())
 
         # Create main Tk root (hidden)
         self.root = tk.Tk()
@@ -326,6 +432,7 @@ class Application:
             overlay=self.overlay,
             status=self.status,
             db=self.db,
+            advisor=self.advisor,
             ui_queue=self.ui_queue,
         )
 
@@ -351,10 +458,14 @@ class Application:
                 if msg[0] == "status":
                     self._apply_status(msg[1])
                 elif msg[0] == "overlay":
-                    self.overlay.show(msg[1], msg[2])
+                    self.overlay.show(msg[1], msg[2], anchor=msg[3])
+                elif msg[0] == "verdict":
+                    self.overlay.show_verdict(*msg[1:5], anchor=msg[5])
+                elif msg[0] == "hide":
+                    self.overlay.hide()
         except queue.Empty:
             pass
-        self.root.after(50, self._pump_ui_queue)
+        self.root.after(20, self._pump_ui_queue)
 
     def run(self) -> None:
         """Start the application."""
@@ -394,7 +505,8 @@ class Application:
         logger.info("Press Ctrl+C in terminal to quit")
         logger.info("=" * 50)
 
-        # Start scanner
+        # Start the ARC Tracker refresher, then the scanner
+        self.advisor.start()
         self.scanner.start()
 
         # Start the main-thread UI pump (must be scheduled from the main thread)
@@ -409,7 +521,11 @@ class Application:
     def quit(self) -> None:
         """Clean shutdown."""
         logger.info("\nShutting down...")
-        self.scanner.stop()
+        try:
+            self.scanner.stop()
+        finally:
+            # Even when a second Ctrl+C interrupts the scanner join
+            self.advisor.stop(timeout=2.0)
         from arc_helper.screen import reset_backend
 
         reset_backend()  # release the portal session / PipeWire stream
@@ -511,6 +627,7 @@ def main() -> None:
         try:
             sys.path.insert(0, str(APP_DIR))
             from update_db import auto_update
+
             auto_update()
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Wiki auto-update unavailable: {e}")

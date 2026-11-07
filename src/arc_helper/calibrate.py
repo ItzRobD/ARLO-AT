@@ -33,6 +33,7 @@ from arc_helper.ocr import get_cursor_position
 from arc_helper.ocr import get_ocr_engine
 from arc_helper.ocr import grab_screen
 from arc_helper.screen import phys_to_tk
+from arc_helper.screen import phys_to_tk_pos
 
 if sys.platform == "win32":
     try:
@@ -126,7 +127,7 @@ class RegionSelector:
         if self.overlay and self.overlay.winfo_exists():
             self.overlay.geometry(
                 f"{phys_to_tk(self.width.get())}x{phys_to_tk(self.height.get())}"
-                f"+{phys_to_tk(self.x.get())}+{phys_to_tk(self.y.get())}"
+                "+{}+{}".format(*phys_to_tk_pos(self.x.get(), self.y.get()))
             )
 
     def hide_overlay(self) -> None:

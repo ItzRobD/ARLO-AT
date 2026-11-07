@@ -25,6 +25,10 @@ class MssBackend:
     def tk_scale(self) -> float:
         return 1.0
 
+    @property
+    def tk_origin(self) -> tuple[int, int]:
+        return (0, 0)
+
     def grab(self, bbox: tuple[int, int, int, int]) -> Image.Image:  # noqa: PLR6301
         import mss
 
