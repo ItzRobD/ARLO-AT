@@ -42,6 +42,7 @@ VERDICT_COLORS: dict[VerdictKind, str] = {
     VerdictKind.KEEP_LOW: "#f49b50",
     VerdictKind.SELL: "#FFD700",
     VerdictKind.RECYCLE: "#00CED1",
+    VerdictKind.CONSUME: "#c4b5fd",
     VerdictKind.NO_RULE: "#888888",
     VerdictKind.UNKNOWN: "#888888",
 }

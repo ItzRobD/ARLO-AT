@@ -220,3 +220,9 @@ def test_persistent_read_failure_logs_once(tmp_path, cat, monkeypatch, caplog):
         for _ in range(3):
             w.current(cat)
     assert len(caplog.records) == 1
+
+
+def test_consume_is_a_valid_action(cat):
+    r = parse_rules("battered_paperback: {action: consume}", cat)
+    assert r.errors == ()
+    assert r.actions == {"battered_paperback": "consume"}

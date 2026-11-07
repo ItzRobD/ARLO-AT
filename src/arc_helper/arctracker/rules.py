@@ -11,7 +11,7 @@ from typing import NoReturn
 
 import yaml
 
-ACTIONS = frozenset({"keep", "sell", "recycle", "buy_on_demand"})
+ACTIONS = frozenset({"keep", "sell", "recycle", "buy_on_demand", "consume"})
 CATEGORIES = frozenset(
     {"weapons", "consumables", "medical", "crafting", "base", "arc_rare"}
 )

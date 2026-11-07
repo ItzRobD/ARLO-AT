@@ -772,3 +772,47 @@ def test_hint_hidden_when_bench_level_unknown(plan):
     v = verdict_for(p, "light_gun_parts")
     assert (v.hint, v.hint_state) == (None, None)
     assert v.made_from != ()  # the rows still show
+
+
+# --- Consume (research items) ----------------------------------------------
+
+CONSUME = "battered_paperback: {action: consume}"
+
+
+def test_consume_rule_without_need(plan):
+    v = verdict_for(
+        plan(owned={"battered_paperback": 4}, rules=CONSUME), "battered_paperback"
+    )
+    assert (v.kind, v.title, v.reason, v.counts) == (
+        K.CONSUME,
+        "Consume 4",
+        "Research · hand in",
+        "Own 4",
+    )
+    v = verdict_for(plan(rules=CONSUME), "battered_paperback")
+    assert (v.kind, v.title, v.counts) == (K.CONSUME, "Consume", "Own 0")
+
+
+def test_consume_uses_note(plan):
+    rules = "battered_paperback: {action: consume, note: Hand in at the station}"
+    v = verdict_for(
+        plan(owned={"battered_paperback": 1}, rules=rules), "battered_paperback"
+    )
+    assert v.reason == "Hand in at the station"
+
+
+def test_consume_offers_only_unclaimed_units(plan):
+    # a quest covering every owned unit wins over consume
+    p = plan(
+        owned={"battered_paperback": 3},
+        needs=[("battered_paperback", 3, "quest", "Q")],
+        rules=CONSUME,
+    )
+    v = verdict_for(p, "battered_paperback")
+    assert (v.kind, v.title) == (K.KEEP, "Keep")
+    p = plan(
+        owned={"battered_paperback": 5},
+        needs=[("battered_paperback", 3, "quest", "Q")],
+        rules=CONSUME,
+    )
+    assert verdict_for(p, "battered_paperback").title == "Consume 2"

@@ -1,7 +1,7 @@
 {
  "version": "1793851158625",
  "generatedAt": "2026-11-05T03:59:18.625Z",
- "itemCount": 26,
+ "itemCount": 27,
  "items": [
   {
    "id": "advanced_mechanical_components",
@@ -5129,6 +5129,28 @@
      ],
      "dropType": [
       "Recipe"
+     ]
+    }
+   }
+  },
+  {
+   "id": "battered_paperback",
+   "name": {
+    "en": "Battered Paperback"
+   },
+   "type": "Misc",
+   "rarity": "Common",
+   "value": 270,
+   "stackSize": 5,
+   "mechanics": {
+    "classification": {
+     "category": "Misc.StudyItem",
+     "itemType": [
+      "Misc"
+     ],
+     "dropType": [
+      "Salvage.Material.Uncommon",
+      "Salvage.ResearchItems"
      ]
     }
    }

@@ -220,6 +220,8 @@ def test_colour_tables():
     assert VERDICT_COLORS[VerdictKind.RECYCLE] == "#00CED1"
     assert VERDICT_COLORS[VerdictKind.NO_RULE] == "#888888"
     assert VERDICT_COLORS[VerdictKind.UNKNOWN] == "#888888"
+    assert VERDICT_COLORS[VerdictKind.CONSUME] == "#c4b5fd"
+    assert set(VERDICT_COLORS) == set(VerdictKind)
     assert CATEGORY_COLORS == {
         "weapons": "#7dd3fc",
         "consumables": "#60a5fa",

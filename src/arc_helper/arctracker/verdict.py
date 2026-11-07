@@ -2,7 +2,8 @@
 
 Decision order (first match wins): unknown id, protected ARC need, loadout,
 own reserve target, crafting ingredient, ``action: keep``, keys, item classes
-with no rule, surplus (sell / recycle), nothing owned, everything claimed.
+with no rule, surplus (sell / recycle / consume), nothing owned, everything
+claimed.
 Only ``Plan.unclaimed`` units are ever offered for sale or recycling, so an
 item a need, the loadout or a reserve holds is never sold.
 """
@@ -29,6 +30,7 @@ MAX_CRAFT_ROWS = 3
 TIMES = "\N{MULTIPLICATION SIGN}"  # the popup copy uses U+00D7
 IN_RAID = "in_raid"  # a craftBench entry that is no workshop module
 ON_DEMAND = "Loadout · craft on demand"  # owned item of a copies: 0 group
+CONSUME_REASON = "Research · hand in"
 
 NEED_KINDS = {
     "quest": "Quest",
@@ -71,6 +73,7 @@ class VerdictKind(Enum):
     KEEP_LOW = "keep_low"
     SELL = "sell"
     RECYCLE = "recycle"
+    CONSUME = "consume"  # research item: hand in at the Research Station
     NO_RULE = "no_rule"
     UNKNOWN = "unknown"
 
@@ -372,7 +375,10 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
             f"Own {owned} · {value}",
         )
 
-    # 7. Surplus.
+    # 7. Surplus. `action: consume` (research items) replaces Sell / Recycle.
+    if action == "consume" and (spare > 0 or owned == 0):
+        title = f"Consume {spare}" if spare > 0 else "Consume"
+        return VerdictKind.CONSUME, title, note or CONSUME_REASON, f"Own {owned}"
     if spare > 0:
         if action == "recycle":
             recycle = True
