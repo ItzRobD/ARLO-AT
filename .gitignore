@@ -19,3 +19,8 @@ dist
 diag_frame.png
 .superpowers/
 cache/
+
+# Personal files (never publish)
+screenshots/
+gpt-plan/
+review-spec.md
