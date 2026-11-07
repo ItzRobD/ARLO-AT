@@ -250,6 +250,48 @@ All settings live in the `.env` file. See [docs/CONFIGURATION.md](https://github
 
 **Quitting:** If you started ARLO from a terminal, press **Ctrl+C**. You can also **right-click the status box** (the "Scanning…" / "ARLO Status" window) to quit, or run `pkill -f arc-helper` in a terminal.
 
+## Personal Verdicts (ARC Tracker, optional)
+
+By default ARLO shows the generic action from `items.csv`. You can connect your [ARC Tracker](https://arctracker.io) account to get verdicts based on your own stash, quests, projects and workshop instead. For example, ARLO stops telling you to recycle a weapon you have equipped.
+
+1. In ARC Tracker, go to **Settings → Developer Access** and create an API key.
+2. Put it in `.env` as `ARCTRACKER_API_KEY=...`. Never commit `.env`.
+3. Optional: `cp rules.example.yaml rules.yaml` and edit it with your own keep targets, loadout and actions. `rules.yaml` is gitignored and reloads while ARLO runs. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#arc-tracker-rules).
+
+How it syncs:
+
+- ARLO pulls your stash, needs and progress when you open the inventory, at most once every 3 minutes.
+- The item catalogue is cached for a day in `cache/`.
+- With no key, ARLO makes no ARC Tracker requests at all.
+- ARC Tracker data is read-only: ARLO never changes your account.
+
+### Reading the popup
+
+| Bar colour | Verdict | Meaning |
+| ---------- | ------- | ------- |
+| Green | **Keep** | Target met; this copy is needed |
+| Yellow | **Keep · building** | Above minimum, still short of the ideal |
+| Orange | **Keep · low** | Below the minimum you set |
+| Gold | **Sell N** | N spare copies; selling beats recycling |
+| Turquoise | **Recycle N** | N spare copies; the recycled parts are worth more |
+| Purple | **Consume N** | Research item; hand spares in at the Research Station |
+| Grey | **No rule** / **Unknown** | No target for this item, or the name wasn't found in ARC Tracker |
+
+- **Below the title:** the reason, coloured by category (quest, project, workshop, loadout, rule), and your counts (for example `Own 5 · crafts need 160`).
+- **Craft rows:** how many you can craft now.
+- **Made-from rows:** the ingredients still needed for the target. They're hidden once the target is met.
+- **⟳ age (top-right corner):** how long ago ARC Tracker last synced. It changes colour once the data is more than 3 hours old.
+
+### Contributing to a public fork
+
+Enable the bundled pre-commit hook once per clone:
+
+```
+git config core.hooksPath .githooks
+```
+
+It refuses commits that contain API keys, tokens, `.env`, `rules.yaml`, `cache/`, `screenshots/` or `debug/` output.
+
 ---
 
 ## Project Structure
