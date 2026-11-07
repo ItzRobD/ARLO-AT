@@ -71,6 +71,10 @@ VERDICT_WIDTH = 260  # popup width at scale 1
 
 # Gap between the game's tooltip and our popup, in physical pixels.
 ANCHOR_GAP = 16
+# Re-showing the same popup ignores tooltip moves up to this far (physical
+# px at 1440p, scaled with the screen): the tooltip finder's bbox flips by a
+# sampling step or two with what is behind the tooltip.
+ANCHOR_HYSTERESIS_PX = 12
 
 # First installed family wins; Segoe UI only exists on Windows.
 FONT_CANDIDATES = (
@@ -157,6 +161,8 @@ class OverlayWindow:
         # age, stale). An unchanged key only repositions and extends the timer.
         self._current_key: tuple | None = None
         self._mode: str | None = None  # "generic" | "verdict"
+        # Tooltip bbox the popup was last placed beside (None: not anchored)
+        self._placed_anchor: tuple[int, int, int, int] | None = None
 
     def _scale(self, value: float) -> int:
         return max(1, round(value * self.ui_scale / self.dpi_scale))
@@ -447,9 +453,25 @@ class OverlayWindow:
         self._mode = mode
 
     def _refresh_shown(self, anchor: tuple[int, int, int, int] | None) -> None:
-        """Same content already up: follow the tooltip, extend the timer."""
-        self._position(anchor)
+        """Same content already up: follow the tooltip, extend the timer.
+
+        Small anchor moves are ignored so a bbox that oscillates by a few
+        pixels does not make the popup jitter.
+        """
+        if not self._anchor_settled(anchor):
+            self._position(anchor)
         self._restart_hide_timer()
+
+    def _anchor_settled(self, anchor: tuple[int, int, int, int] | None) -> bool:
+        """True if ``anchor`` is within the hysteresis of the placed anchor."""
+        placed = self._placed_anchor
+        if placed is None or anchor is None or not self._anchored_to_tooltip():
+            return False
+        tol = max(1, round(ANCHOR_HYSTERESIS_PX * get_backend().resolution()[1] / 1440))
+        return abs(anchor[0] - placed[0]) <= tol and abs(anchor[1] - placed[1]) <= tol
+
+    def _anchored_to_tooltip(self) -> bool:
+        return self.settings.overlay.anchor.lower() == "tooltip"
 
     def _restart_hide_timer(self) -> None:
         if self._hide_after_id:
@@ -622,7 +644,9 @@ class OverlayWindow:
 
     def _position(self, anchor: tuple[int, int, int, int] | None) -> None:
         """Move the popup beside the tooltip, or to OVERLAY_X/Y."""
-        if self.settings.overlay.anchor.lower() == "tooltip" and anchor:
+        self._placed_anchor = None
+        if self._anchored_to_tooltip() and anchor:
+            self._placed_anchor = anchor
             backend = get_backend()
             scale = backend.tk_scale
             size = (
@@ -639,6 +663,7 @@ class OverlayWindow:
             self.window.after_cancel(self._hide_after_id)
             self._hide_after_id = None
         self._current_key = None
+        self._placed_anchor = None
         self.window.withdraw()
 
     def set_position(self, x: int, y: int) -> None:

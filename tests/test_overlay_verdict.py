@@ -452,3 +452,69 @@ def test_scanner_unresolved_with_personal_data_shows_unknown(monkeypatch):
     assert db.lookups == 0  # no generic LIKE / fuzzy fallback
     assert db.missing == ["MYSTERY"]
     assert sc.stats.items_found_in_db == 0
+
+
+# --- Placement hysteresis (bug B: popup jitters with the tooltip bbox) ---
+
+
+@pytest.fixture
+def placed(root, monkeypatch):
+    """Overlay anchored to the tooltip on a 3440x1440 screen; returns the
+    window and the list of physical positions it was moved to."""
+    moves: list[tuple[int, int]] = []
+
+    def record(x, y):
+        moves.append((x, y))
+        return x, y
+
+    monkeypatch.setattr(overlay_mod, "phys_to_tk_pos", record)
+    backend = SimpleNamespace(tk_scale=1.0, resolution=lambda: (3440, 1440))
+    monkeypatch.setattr(overlay_mod, "get_backend", lambda: backend)
+    ov = OverlayWindow(root)
+    monkeypatch.setattr(ov.settings.overlay, "anchor", "tooltip")
+    return ov, moves
+
+
+def _anchor(dy: int = 0, dx: int = 0) -> tuple[int, int, int, int]:
+    return (1000 + dx, 400 + dy, 1500 + dx, 950 + dy)
+
+
+def test_same_verdict_ignores_small_anchor_oscillation(placed):
+    ov, moves = placed
+    v = _low_ingredient()
+    ov.show_verdict("X", v, "⟳ 1m", False, _anchor())
+    first = moves[-1]
+    for dy in (8, -8, 8, -8, 4, 0, -4):
+        ov.show_verdict("X", v, "⟳ 1m", False, _anchor(dy, dx=-dy))
+    assert moves[-1] == first
+    assert set(moves) == {first}
+
+
+def test_same_verdict_follows_a_real_move(placed):
+    ov, moves = placed
+    v = _low_ingredient()
+    ov.show_verdict("X", v, "⟳ 1m", False, _anchor())
+    ov.show_verdict("X", v, "⟳ 1m", False, _anchor(40))
+    assert moves[-1][1] == moves[0][1] + 40
+
+
+def test_same_generic_popup_ignores_small_anchor_oscillation(placed):
+    ov, moves = placed
+    ov.show("X", None, anchor=_anchor())
+    first = moves[-1]
+    for dy in (8, -8, 8):
+        ov.show("X", None, anchor=_anchor(dy))
+    assert set(moves) == {first}
+    ov.show("X", None, anchor=_anchor(40))
+    assert moves[-1][1] == first[1] + 40
+
+
+def test_new_item_or_hidden_popup_always_repositions(placed):
+    ov, moves = placed
+    v = _low_ingredient()
+    ov.show_verdict("X", v, "⟳ 1m", False, _anchor())
+    ov.show_verdict("Y", v, "⟳ 1m", False, _anchor(8))  # new item
+    assert moves[-1][1] == moves[0][1] + 8
+    ov.hide()
+    ov.show_verdict("Y", v, "⟳ 1m", False, _anchor())  # shown again
+    assert moves[-1] == moves[0]

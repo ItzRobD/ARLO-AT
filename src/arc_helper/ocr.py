@@ -7,6 +7,7 @@ import atexit
 import hashlib
 import re
 import string
+import time
 
 import numpy as np
 import pytesseract
@@ -112,6 +113,10 @@ class OCREngine:
         # it is read (the game animates it in), and an unchanged tooltip is
         # not OCR'd again.
         self._prev_bbox: tuple[int, int, int, int] | None = None
+        # Last bbox that passed the stability check; a scan close to it is
+        # the same settled tooltip even if it differs from the previous scan
+        self._accepted_bbox: tuple[int, int, int, int] | None = None
+        self._last_jitter_log = float("-inf")
         self._cache_key: tuple | None = None
         self._cache_name: str | None = None
 
@@ -198,8 +203,6 @@ class OCREngine:
 
     def _maybe_save_full_frame(self, width: int, height: int) -> None:
         """Debug aid: save the whole game monitor every few seconds."""
-        import time
-
         now = time.monotonic()
         if now - getattr(self, "_last_full_frame", 0.0) < 3.0:
             return
@@ -473,6 +476,10 @@ class OCREngine:
     # Max movement (physical px) between scans for a tooltip to count as
     # settled rather than still animating in.
     STABLE_TOLERANCE_PX = 6
+    # Max movement from the last accepted (settled) bbox that still counts
+    # as the same tooltip. find_tooltip samples every 4th pixel, so what is
+    # behind the tooltip can flip an edge between two values 8 px apart.
+    ACCEPTED_TOLERANCE_PX = 12
 
     def ocr_text(
         self, image: Image.Image, *, psm: int = PSM_SINGLE_BLOCK, upper: bool = False
@@ -503,12 +510,20 @@ class OCREngine:
 
         bbox = find_tooltip(frame)
         prev, self._prev_bbox = self._prev_bbox, bbox
-        if bbox is None or prev is None or not _bbox_close(
-            bbox, prev, self.STABLE_TOLERANCE_PX
-        ):
+        accepted = self._accepted_bbox
+        stable = bbox is not None and (
+            (prev is not None and _bbox_close(bbox, prev, self.STABLE_TOLERANCE_PX))
+            or (
+                accepted is not None
+                and _bbox_close(bbox, accepted, self.ACCEPTED_TOLERANCE_PX)
+            )
+        )
+        if not stable:
+            self._accepted_bbox = None
             self.last_tooltip_bbox = None  # gone, or still animating in
             return None
-        self.last_tooltip_bbox = bbox
+        self._log_bbox_jitter(accepted, bbox)
+        self._accepted_bbox = self.last_tooltip_bbox = bbox
 
         left, top, right, bottom = bbox
         pad = 8
@@ -540,6 +555,22 @@ class OCREngine:
         if item_name:
             logger.debug(f"Extracted item name: '{item_name}'")
         return item_name
+
+    def _log_bbox_jitter(
+        self,
+        old: tuple[int, int, int, int] | None,
+        new: tuple[int, int, int, int],
+    ) -> None:
+        """Debug aid: note a settled tooltip's bbox moving within tolerance
+        (at most once a second), so jitter reports come with data."""
+        if not self.debug_mode or old is None or old == new:
+            return
+        now = time.monotonic()
+        if now - self._last_jitter_log < 1.0:
+            return
+        self._last_jitter_log = now
+        delta = tuple(n - o for n, o in zip(new, old, strict=True))
+        logger.debug(f"Tooltip bbox jitter: {old} -> {new} (delta {delta})")
 
     def extract_item_name_at_cursor(self) -> str | None:
         """
