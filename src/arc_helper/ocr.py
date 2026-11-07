@@ -26,6 +26,9 @@ from .tess_api import PSM_SINGLE_LINE
 from .tess_api import TessApi
 from .tooltip_finder import find_tooltip
 
+# A plain-pass token that is only Roman numeral look-alikes ("|", "Il", "lV")
+_NUMERAL_TOKEN = re.compile(r"[|l1!IiV]+")
+
 
 def grab_frame_array(width: int, height: int) -> np.ndarray:
     """Whole captured monitor as an HxWx3 RGB array (a view when possible)."""
@@ -591,13 +594,41 @@ class OCREngine:
         plain = self.ocr_text(processed)
         logger.debug(f"Raw tooltip OCR:\n{plain}")
 
-        line_count = self._count_name_lines(plain)
-        if line_count == 0:
+        plain_names = self._name_lines(plain)
+        if not plain_names:
             return None
 
         whitelisted = self.ocr_text(processed, upper=True)
         name_lines = [ln.strip() for ln in whitelisted.split("\n") if ln.strip()]
-        return self._clean_text(" ".join(name_lines[:line_count])) or None
+        name = self._clean_text(" ".join(name_lines[: len(plain_names)]))
+        return self._clean_text(self._merge_numeral(plain_names[-1], name)) or None
+
+    @staticmethod
+    def _merge_numeral(plain_name_line: str, upper_text: str) -> str:
+        """Restore a tier numeral the uppercase pass dropped.
+
+        A lone "I" in a bold title often vanishes from the whitelisted pass
+        ("TEMPEST I" reads as "TEMPEST"), while the plain pass keeps it as a
+        look-alike ("TEMPEST |"). When the plain line ends in a separate
+        numeral-like token and the uppercase text ends in a shorter numeral
+        run, replace that run with the normalised numeral. A longer or equal
+        run is kept: the plain pass is the one that drops "II" to "I".
+        """
+        tokens = plain_name_line.split()
+        if len(tokens) < 2 or not _NUMERAL_TOKEN.fullmatch(tokens[-1]):
+            return upper_text
+        numeral = "".join("V" if c == "V" else "I" for c in tokens[-1])
+
+        def tail(text: str) -> int:
+            return len(text) - len(text.rstrip("IV"))
+
+        upper = upper_text.rstrip()
+        # Numeral-like letters that end the name word itself ("TAXI")
+        word_tail = tail(re.sub(r"[^A-Z]", "", tokens[-2].upper()))
+        run = max(0, tail(upper) - word_tail)
+        if run >= len(numeral):
+            return upper_text
+        return f"{upper[: len(upper) - run].rstrip()} {numeral}"
 
     @staticmethod
     def _upper_ratio(text: str) -> float:
@@ -606,22 +637,26 @@ class OCREngine:
         return sum(c.isupper() for c in alpha) / len(alpha) if alpha else 0.0
 
     @classmethod
-    def _count_name_lines(cls, text: str) -> int:
-        """Count the leading mostly-uppercase lines that form the item name.
+    def _name_lines(cls, text: str) -> list[str]:
+        """The leading mostly-uppercase lines that form the item name, raw.
 
         Stops at the first lower-case line (the description), tolerating a
         stray mis-cased character (e.g. "II" read as "Il") via a ratio.
+        Lines are returned uncleaned so a numeral read as "|" survives.
         """
-        count = 0
-        started = False
+        lines: list[str] = []
         for raw_line in text.split("\n"):
             line = cls._clean_text(raw_line)
             if len(line) >= 2 and cls._upper_ratio(line) >= 0.6:
-                count += 1
-                started = True
-            elif started or len(line) >= 2:
+                lines.append(raw_line.strip())
+            elif lines or len(line) >= 2:
                 break
-        return count
+        return lines
+
+    @classmethod
+    def _count_name_lines(cls, text: str) -> int:
+        """Count the leading mostly-uppercase lines that form the item name."""
+        return len(cls._name_lines(text))
 
     def parse_item_name_from_tooltip(self, text: str) -> str | None:
         """
