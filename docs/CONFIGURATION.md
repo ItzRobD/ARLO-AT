@@ -50,7 +50,7 @@ OVERLAY_COOLDOWN=2.0             # Minimum time between showing same item (secon
 # =============================================================================
 
 TRIGGER_SCAN_INTERVAL=0.5        # Seconds between trigger scans
-TOOLTIP_SCAN_INTERVAL=0.3        # Seconds between tooltip scans
+TOOLTIP_SCAN_INTERVAL=0.1        # Seconds between tooltip scans
 
 # =============================================================================
 # DEBUG SETTINGS

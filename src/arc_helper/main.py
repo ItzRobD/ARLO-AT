@@ -150,7 +150,10 @@ class Scanner:
     # Cooldown tracking
     _last_shown_item: str = ""
     _last_shown_time: float = 0
-    _trigger_check_counter: int = 0
+    _last_trigger_check: float = 0.0
+    _overlay_visible: bool = False
+    # Item lookups by OCR'd name (frame mode re-shows every scan)
+    _lookup_cache: dict = field(default_factory=dict)
 
     # Hotkey override (Ctrl+Shift to force tooltip scanning)
     _hotkey_override: bool = False
@@ -237,28 +240,37 @@ class Scanner:
                             self._hotkey_override = False
                             self.state = ScannerState.IDLE
                             self._update_status("scanning")
+                            self._hide_overlay()
                             logger.info("Hotkey released - returning to idle")
                             continue
                     else:
-                        # Inventory mode: check trigger every 3rd scan
-                        self._trigger_check_counter += 1
-                        should_check_trigger = self._trigger_check_counter % 3 == 0
-
+                        # Inventory mode: re-check the trigger on a timer
+                        # (it costs an OCR call; tooltip scans are cheaper)
+                        now = time.monotonic()
+                        should_check_trigger = (
+                            now - self._last_trigger_check
+                            >= settings.scan.trigger_scan_interval
+                        )
+                        if should_check_trigger:
+                            self._last_trigger_check = now
                         if should_check_trigger and not ocr.check_trigger_any(
                             [settings.trigger_region, settings.trigger_region2]
                         ):
                             # Inventory closed, go back to idle
                             self.state = ScannerState.IDLE
                             self._update_status("scanning")
+                            self._hide_overlay()
                             logger.info("INVENTORY closed - returning to idle")
                             continue
 
-                    # Scan tooltip at cursor position
                     item_name = ocr.read_hovered_item_name()
                     self.stats.tooltip_scans += 1
 
                     if item_name:
                         self._handle_detected_item(item_name)
+                    elif ocr.detection != "cursor" and ocr.last_tooltip_bbox is None:
+                        # Tooltip closed (or another one animating in)
+                        self._hide_overlay()
 
                     # Wait before next tooltip scan
                     time.sleep(settings.scan.tooltip_scan_interval)
@@ -277,6 +289,16 @@ class Scanner:
         """Handle a detected item name."""
         settings = get_settings()
         current_time = time.time()
+        ocr = get_ocr_engine()
+
+        if ocr.detection != "cursor" and item_name == self._last_shown_item:
+            # Frame mode: the tooltip is still up, so keep the popup up
+            # (show() on an already-visible item only extends its timer).
+            self._show_overlay(
+                item_name, self._lookup_cache.get(item_name), ocr.last_tooltip_bbox
+            )
+            self._last_shown_time = current_time
+            return
 
         # Check cooldown - don't spam the same item
         if (
@@ -290,7 +312,9 @@ class Scanner:
         self.stats.last_item_time = current_time
 
         # Look up in database
-        recommendation = self.db.lookup(item_name)
+        if item_name not in self._lookup_cache:
+            self._lookup_cache[item_name] = self.db.lookup(item_name)
+        recommendation = self._lookup_cache[item_name]
 
         if recommendation:
             self.stats.items_found_in_db += 1
@@ -301,8 +325,7 @@ class Scanner:
             self.db.log_missing_item(item_name)
 
         # Show overlay (must be done on main thread), beside the tooltip
-        anchor = get_ocr_engine().last_tooltip_bbox
-        self._show_overlay(item_name, recommendation, anchor)
+        self._show_overlay(item_name, recommendation, ocr.last_tooltip_bbox)
 
         # Update cooldown tracking
         self._last_shown_item = item_name
@@ -315,7 +338,15 @@ class Scanner:
         anchor: tuple[int, int, int, int] | None = None,
     ) -> None:
         """Queue an overlay update for the main (GUI) thread to apply."""
+        self._overlay_visible = True
         self.ui_queue.put(("overlay", item_name, recommendation, anchor))
+
+    def _hide_overlay(self) -> None:
+        """Queue hiding the popup (once) for the main thread."""
+        if self._overlay_visible:
+            self._overlay_visible = False
+            self._last_shown_item = ""
+            self.ui_queue.put(("hide",))
 
     def _update_status(self, status: str) -> None:
         """Queue a status update for the main (GUI) thread to apply."""
@@ -380,9 +411,11 @@ class Application:
                     self._apply_status(msg[1])
                 elif msg[0] == "overlay":
                     self.overlay.show(msg[1], msg[2], anchor=msg[3])
+                elif msg[0] == "hide":
+                    self.overlay.hide()
         except queue.Empty:
             pass
-        self.root.after(50, self._pump_ui_queue)
+        self.root.after(20, self._pump_ui_queue)
 
     def run(self) -> None:
         """Start the application."""

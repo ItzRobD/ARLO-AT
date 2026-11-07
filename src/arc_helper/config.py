@@ -224,7 +224,7 @@ class ScanSettings(BaseSettings):
         default=0.5, description="Seconds between trigger scans"
     )
     tooltip_scan_interval: float = Field(
-        default=0.3, description="Seconds between tooltip scans"
+        default=0.1, description="Seconds between tooltip scans"
     )
 
 
