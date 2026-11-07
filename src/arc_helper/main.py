@@ -19,6 +19,7 @@ from threading import Thread
 from dotenv import load_dotenv
 
 from arc_helper.clickthrough import make_click_through
+from arc_helper.clickthrough import make_outline
 from arc_helper.config import APP_DIR
 from arc_helper.config import SettingsManager
 from arc_helper.config import get_settings
@@ -57,9 +58,10 @@ class DebugOverlay:
         self.window = tk.Toplevel(root)
         self.window.title("Capture Area")
         self.window.attributes("-topmost", True)  # noqa: FBT003
-        self.window.attributes("-alpha", 0.3)  # Semi-transparent
+        self.window.attributes("-alpha", 0.3)  # ignored by KWin; see make_outline
         self.window.overrideredirect(boolean=True)
         self.window.config(bg="red")
+        self._shaped_size: tuple[int, int] | None = None
         make_click_through(self.window)
 
         # Update position periodically
@@ -70,15 +72,24 @@ class DebugOverlay:
         try:
             from arc_helper.ocr import get_cursor_position
             from arc_helper.screen import phys_to_tk
+            from arc_helper.screen import phys_to_tk_pos
 
             cursor = get_cursor_position()
 
-            x = phys_to_tk(cursor.x + self.settings.tooltip_capture.offset_x)
-            y = phys_to_tk(cursor.y + self.settings.tooltip_capture.offset_y)
+            x, y = phys_to_tk_pos(
+                cursor.x + self.settings.tooltip_capture.offset_x,
+                cursor.y + self.settings.tooltip_capture.offset_y,
+            )
             w = phys_to_tk(self.settings.tooltip_capture.width)
             h = phys_to_tk(self.settings.tooltip_capture.height)
 
             self.window.geometry(f"{w}x{h}+{x}+{y}")
+            if self._shaped_size != (w, h):
+                # Hollow box: a solid one would cover (and be captured
+                # instead of) the tooltip it is meant to show.
+                make_outline(self.window, w, h)
+                make_click_through(self.window)
+                self._shaped_size = (w, h)
         except Exception:  # noqa: BLE001
             pass
 

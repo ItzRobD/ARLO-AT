@@ -11,9 +11,11 @@ from PIL import Image
 
 from arc_helper.config import logger
 
+from .base import MonitorGeometry
 from .base import Point
 from .base import ScreenCaptureUnavailable
 from .base import compute_scale
+from .base import pick_monitor
 from .frame import crop_bgrx
 from .token_store import load_token
 from .token_store import save_token
@@ -58,6 +60,7 @@ class WaylandBackend:
         self._first_frame = threading.Event()
         self._size: tuple[int, int] = (0, 0)
         self._tk_scale = 1.0
+        self._tk_origin: tuple[int, int] = (0, 0)
         self._restarted = False
         self._terminal_error: str | None = None
 
@@ -124,14 +127,24 @@ class WaylandBackend:
             msg = "First frame vanished unexpectedly"
             raise OSError(msg)
         _, width, height, _ = frame
-        # Single-monitor assumption: XWayland reports the total logical
-        # screen width, the stream is one monitor. Fine for the primary-
-        # monitor use case; multi-monitor scaling is a known limitation.
         # Plain attribute stores (atomic in CPython); readers may see one stale frame's worth during restart - harmless.
         self._size = (width, height)
-        self._tk_scale = compute_scale(width, self._x11_logical_width())
+        connector = None
+        if self._session is not None:
+            connector = self._session.stream_props.get("mapping_id")
+        monitor = pick_monitor(self._x11_monitors(), connector, (width, height))
+        if monitor is not None:
+            # The stream is one monitor; map it onto that monitor's X11 rect.
+            self._tk_scale = compute_scale(width, monitor.width)
+            self._tk_origin = (monitor.x, monitor.y)
+        else:
+            # No RandR info: assume a single monitor at the X11 origin.
+            self._tk_scale = compute_scale(width, self._x11_logical_width())
+            self._tk_origin = (0, 0)
         logger.info(
-            f"Wayland capture: {width}x{height}, tk scale {self._tk_scale:.4g}"
+            f"Wayland capture: {width}x{height} "
+            f"(X11 monitor {monitor.name if monitor else '?'}), "
+            f"tk scale {self._tk_scale:.4g}, tk origin {self._tk_origin}"
         )
 
     def stop(self) -> None:
@@ -165,9 +178,10 @@ class WaylandBackend:
         from pynput import mouse as pynput_mouse
 
         pos = pynput_mouse.Controller().position
+        ox, oy = self._tk_origin
         return Point(
-            x=round(pos[0] * self._tk_scale),
-            y=round(pos[1] * self._tk_scale),
+            x=round((pos[0] - ox) * self._tk_scale),
+            y=round((pos[1] - oy) * self._tk_scale),
         )
 
     def resolution(self) -> tuple[int, int]:
@@ -176,6 +190,10 @@ class WaylandBackend:
     @property
     def tk_scale(self) -> float:
         return self._tk_scale
+
+    @property
+    def tk_origin(self) -> tuple[int, int]:
+        return self._tk_origin
 
     # ------------------------------------------------------------------
 
@@ -215,6 +233,31 @@ class WaylandBackend:
             err, debug = message.parse_error()
             parts.append(f"{err.message} ({debug})")
         return f"\nGStreamer errors: {'; '.join(parts)}" if parts else ""
+
+    def _x11_monitors(self) -> list[MonitorGeometry]:  # noqa: PLR6301
+        try:
+            from Xlib import display as xlib_display
+            from Xlib.ext import randr
+
+            xdisplay = xlib_display.Display()
+            try:
+                root = xdisplay.screen().root
+                return [
+                    MonitorGeometry(
+                        name=xdisplay.get_atom_name(m.name),
+                        x=m.x,
+                        y=m.y,
+                        width=m.width_in_pixels,
+                        height=m.height_in_pixels,
+                        primary=bool(m.primary),
+                    )
+                    for m in randr.get_monitors(root).monitors
+                ]
+            finally:
+                xdisplay.close()
+        except Exception as e:  # noqa: BLE001 - optional refinement
+            logger.warning(f"Could not list X11 monitors ({e})")
+            return []
 
     def _x11_logical_width(self) -> int:  # noqa: PLR6301
         try:

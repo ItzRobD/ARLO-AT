@@ -14,7 +14,7 @@ from .base import ScreenBackend
 from .base import ScreenCaptureUnavailable
 from .base import choose_backend_name
 
-__all__ = ["Point", "ScreenBackend", "ScreenCaptureUnavailable", "get_backend", "phys_to_tk", "reset_backend"]
+__all__ = ["Point", "ScreenBackend", "ScreenCaptureUnavailable", "get_backend", "phys_to_tk", "phys_to_tk_pos", "reset_backend"]
 
 _backend: ScreenBackend | None = None  # noqa: RUF067
 _lock = threading.Lock()  # noqa: RUF067
@@ -58,5 +58,12 @@ def reset_backend() -> None:  # noqa: RUF067
 
 
 def phys_to_tk(value: float) -> int:  # noqa: RUF067
-    """Convert physical pixels to tkinter window coordinates."""
+    """Convert a physical-pixel length (width, height, offset) to tk units."""
     return round(value / get_backend().tk_scale)
+
+
+def phys_to_tk_pos(x: float, y: float) -> tuple[int, int]:  # noqa: RUF067
+    """Convert a physical-pixel screen position to tk window coordinates."""
+    backend = get_backend()
+    ox, oy = backend.tk_origin
+    return ox + round(x / backend.tk_scale), oy + round(y / backend.tk_scale)

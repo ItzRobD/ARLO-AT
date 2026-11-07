@@ -10,7 +10,7 @@ from .clickthrough import make_click_through
 from .config import get_dpi_scale
 from .config import get_settings
 from .database import Item
-from .screen import phys_to_tk
+from .screen import phys_to_tk_pos
 
 # Action colors
 ACTION_COLORS: dict[str, str] = {
@@ -214,7 +214,7 @@ class OverlayWindow:
 
         # Position and show
         self.window.geometry(
-            f"+{phys_to_tk(self.overlay_x)}+{phys_to_tk(self.overlay_y)}"
+            "+{}+{}".format(*phys_to_tk_pos(self.overlay_x, self.overlay_y))
         )
         self.window.deiconify()
         self.window.lift()
@@ -264,7 +264,9 @@ class StatusWindow:
         self.window.attributes("-topmost", True)  # noqa: FBT003
         self.window.attributes("-alpha", 0.8)
         self.window.overrideredirect(boolean=True)
-        self.window.geometry("+10+10")
+        # Top-left of the captured (game) monitor, not of the X11 desktop,
+        # which on multi-monitor setups can be a different screen.
+        self.window.geometry("+{}+{}".format(*phys_to_tk_pos(10, 10)))
         if on_quit:
             self.window.bind("<Button-3>", lambda e: on_quit())  # Right-click to quit
 

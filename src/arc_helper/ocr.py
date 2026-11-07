@@ -96,6 +96,9 @@ class OCREngine:
 
         cursor = get_cursor_position()
         screen_width, screen_height = get_screen_resolution()
+        if self.debug_mode:
+            logger.debug(f"Cursor (physical, game monitor): ({cursor.x}, {cursor.y})")
+            self._maybe_save_full_frame(screen_width, screen_height)
 
         # TODO: flipping the tooltip region on the right side of screen
         # to be implemented properly
@@ -143,6 +146,19 @@ class OCREngine:
             return Image.new("RGB", (100, 100), color="black"), cursor
 
         return image, cursor
+
+    def _maybe_save_full_frame(self, width: int, height: int) -> None:
+        """Debug aid: save the whole game monitor every few seconds."""
+        import time
+
+        now = time.monotonic()
+        if now - getattr(self, "_last_full_frame", 0.0) < 3.0:
+            return
+        self._last_full_frame = now
+        try:
+            grab_screen((0, 0, width, height)).save(self.debug_dir / "full_frame.png")
+        except OSError as e:
+            logger.debug(f"Full-frame debug capture failed: {e}")
 
     def check_trigger_any(self, regions: list[RegionMixin]) -> bool:
         """
