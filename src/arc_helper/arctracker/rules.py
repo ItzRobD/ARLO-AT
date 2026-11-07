@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import contextlib
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,6 +17,8 @@ CATEGORIES = frozenset(
 )
 RESERVED = frozenset({"loadout", "keys"})
 DEFAULT_TIER = 5
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from arc_helper.arctracker.catalogue import Catalogue
@@ -168,10 +170,14 @@ def _parse_entry(
             if not 4 <= tier <= 6:
                 _fail(f"tier must be 4..6, got {tier}")
         action = spec.get("action")
-        if action is not None and action not in ACTIONS:
+        if action is not None and (
+            not isinstance(action, str) or action not in ACTIONS
+        ):
             _fail(f"unknown action {action!r}")
         category = spec.get("category")
-        if category is not None and category not in CATEGORIES:
+        if category is not None and (
+            not isinstance(category, str) or category not in CATEGORIES
+        ):
             _fail(f"unknown category {category!r}")
         units = _target(spec, item.stack_size)
     except ValueError as exc:
@@ -228,11 +234,12 @@ def _parse_keys(spec: Any, errors: list[str]) -> frozenset[str]:
 
 
 class RulesWatcher:
-    """Reloads rules when the file's mtime changes; keeps old rules on YAML errors."""
+    """Reloads rules when the file or catalogue changes; keeps old rules on failure."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
         self._mtime_ns: int | None = None
+        self._catalogue: Catalogue | None = None
         self._rules: Rules | None = None
 
     def current(self, catalogue: Catalogue) -> Rules | None:
@@ -240,10 +247,24 @@ class RulesWatcher:
             mtime = self.path.stat().st_mtime_ns
         except OSError:
             return self._rules
-        if mtime != self._mtime_ns:
-            self._mtime_ns = mtime
-            with contextlib.suppress(yaml.YAMLError, OSError, UnicodeDecodeError):
-                self._rules = parse_rules(
-                    self.path.read_text(encoding="utf-8"), catalogue
-                )
-        return self._rules
+        if mtime == self._mtime_ns and catalogue is self._catalogue:
+            return self._rules
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            logger.warning("Cannot read rules file %s: %s", self.path, exc)
+            return self._rules
+        # Failed parses are remembered too, so a broken file is not re-parsed.
+        self._mtime_ns = mtime
+        self._catalogue = catalogue
+        try:
+            rules = parse_rules(text, catalogue)
+        except Exception as exc:  # noqa: BLE001 - any parse failure keeps old rules
+            logger.warning(
+                "Invalid rules file %s, keeping previous rules: %s", self.path, exc
+            )
+            return self._rules
+        for err in rules.errors:
+            logger.warning("rules.yaml: %s", err)
+        self._rules = rules
+        return rules

@@ -138,3 +138,62 @@ def test_watcher_reloads_on_change(tmp_path, cat):
 
 def test_watcher_missing_file_returns_none(tmp_path, cat):
     assert RulesWatcher(tmp_path / "nope.yaml").current(cat) is None
+
+
+def test_unhashable_action_and_category_do_not_raise(cat):
+    r = parse_rules(
+        "oil: {action: [keep]}\ncanister: {category: {a: 1}, target: 2}", cat
+    )
+    assert len(r.errors) == 2
+    assert not r.actions
+    assert "canister" not in r.targets
+
+
+def test_watcher_survives_value_error_in_yaml(tmp_path, cat):
+    p = tmp_path / "rules.yaml"
+    p.write_text("oil: {target: 3}\n")
+    w = RulesWatcher(p)
+    w.current(cat)
+    p.write_text("when: 2024-13-45\n")
+    _bump(p)
+    assert w.current(cat).targets["oil"].ideal == 3
+
+
+def test_watcher_logs_failure_and_entry_errors(tmp_path, cat, caplog):
+    p = tmp_path / "rules.yaml"
+    p.write_text("bogus: {target: 1}\n")
+    w = RulesWatcher(p)
+    with caplog.at_level("WARNING"):
+        w.current(cat)
+    assert "bogus" in caplog.text
+    caplog.clear()
+    p.write_text("a: [")
+    _bump(p)
+    with caplog.at_level("WARNING"):
+        w.current(cat)
+    assert "Invalid rules file" in caplog.text
+
+
+def test_watcher_reparses_when_catalogue_changes(tmp_path, cat):
+    from arc_helper.arctracker.catalogue import Catalogue
+
+    p = tmp_path / "rules.yaml"
+    p.write_text("oil: {target: 3}\n")
+    w = RulesWatcher(p)
+    assert w.current(Catalogue(items={})).targets == {}
+    assert "oil" in w.current(cat).targets
+
+
+def test_watcher_retries_read_after_oserror(tmp_path, cat, monkeypatch):
+    p = tmp_path / "rules.yaml"
+    p.write_text("oil: {target: 3}\n")
+    w = RulesWatcher(p)
+    real = type(p).read_text
+
+    def boom(*_args, **_kwargs):
+        raise OSError
+
+    monkeypatch.setattr(type(p), "read_text", boom)
+    assert w.current(cat) is None
+    monkeypatch.setattr(type(p), "read_text", real)
+    assert w.current(cat).targets["oil"].ideal == 3
