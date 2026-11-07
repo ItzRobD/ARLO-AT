@@ -18,8 +18,16 @@ from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger(__name__)
 
-MAX_PAGES = 6  # per paged tool; guards against a server that never stops paging
-MAX_CALLS = 10  # tool calls per refresh, paging included (5 are fixed)
+# Tool calls per refresh, paging included. A refresh every 300 s against the
+# server's 150 calls / 10 min limit could afford ~70; 20 leaves ample room.
+MAX_CALLS = 20
+# Per paged tool: the most one tool can use while the other three paged/fixed
+# tools (needs or inventory, tracking, two progress calls) still get one each.
+MAX_PAGES = MAX_CALLS - 4
+# Largest page sizes the tools' input schemas accept (maximum in list_tools).
+INVENTORY_LIMIT = 100
+NEEDS_LIMIT = 30
+TRACKING_LIMIT = 50
 TIMEOUT_S = 30.0
 TOTAL_TIMEOUT_S = 120.0
 
@@ -192,9 +200,13 @@ async def _pages(
 
 async def _collect(session: Any) -> dict[str, Any]:
     budget = _Budget(MAX_CALLS)
-    inventory = await _pages(session, budget, "get_my_inventory", {"limit": 100})
-    needs = await _pages(session, budget, "get_my_needs", {"limit": 30})
-    tracking = await _pages(session, budget, "get_my_tracking", {"limit": 50})
+    inventory = await _pages(
+        session, budget, "get_my_inventory", {"limit": INVENTORY_LIMIT}
+    )
+    needs = await _pages(session, budget, "get_my_needs", {"limit": NEEDS_LIMIT})
+    tracking = await _pages(
+        session, budget, "get_my_tracking", {"limit": TRACKING_LIMIT}
+    )
     entries = [e for page in tracking for e in page.get("entries") or []]
     blueprints = await _call(
         session, budget, "get_my_progress", {"section": "blueprints"}

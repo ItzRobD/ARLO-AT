@@ -56,6 +56,36 @@ def test_collect_pages_within_budget():
     assert len(raw["needs"]) == 2
     assert raw["tracking"] == {"entries": [{"id": "t0"}]}
     assert len(session.calls) == 7
+    limits = {tool: args["limit"] for tool, args in session.calls if "limit" in args}
+    assert limits == {
+        "get_my_inventory": 100,
+        "get_my_needs": 30,
+        "get_my_tracking": 50,
+    }
+
+
+def test_budget_and_pages_are_consistent():
+    assert mcp_client.MAX_CALLS == 20
+    # one tool paging to MAX_PAGES still leaves a call for each other tool
+    assert mcp_client.MAX_PAGES + 4 <= mcp_client.MAX_CALLS
+
+
+def test_large_account_fits_budget():
+    """~300 stash items (3 pages), 4 needs pages, 2 tracking pages: 11 calls."""
+
+    def pages(tool, args):
+        off = args.get("offset", 0)
+        if tool == "get_my_inventory":
+            return {"truncated": off < 200, "nextOffset": off + 100}
+        if tool == "get_my_needs":
+            return {"more": {"nextOffset": off + 30}} if off < 90 else {}
+        if tool == "get_my_tracking":
+            return {"entries": [], "more": {"nextOffset": 50}} if off == 0 else {}
+        return {}
+
+    raw, session = _collect(pages)
+    assert (len(raw["inventory"]), len(raw["needs"])) == (3, 4)
+    assert len(session.calls) == 11
 
 
 def test_call_budget_enforced_when_always_truncated():
