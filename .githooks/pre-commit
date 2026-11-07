@@ -3,10 +3,11 @@
 # Enabled with: git config core.hooksPath .githooks
 set -euo pipefail
 
-blocked_paths='(^|/)rules\.yaml$|(^|/)\.env($|\.)|(^|/)cache/|(^|/)screenshots/|(^|/)gpt-plan/|\.screencast_restore_token|(^|/)debug/|(^|/)snapshot\.json$'
+blocked_paths='(^|/)rules\.ya?ml$|(^|/)\.env($|\.)|(^|/)cache/|(^|/)screenshots/|(^|/)gpt-plan/|\.screencast_restore_token|(^|/)debug/|(^|/)snapshot\.json$'
 allowed_paths='(^|/)\.env\.example$'
 
 fail=0
+shopt -s nocasematch  # Rules.YAML, .ENV, Cache/ ... are blocked too
 while IFS= read -r path; do
     [[ -z "$path" ]] && continue
     if [[ "$path" =~ $blocked_paths && ! "$path" =~ $allowed_paths ]]; then
@@ -14,6 +15,7 @@ while IFS= read -r path; do
         fail=1
     fi
 done < <(git diff --cached --name-only --diff-filter=ACMR)
+shopt -u nocasematch
 
 # Added lines only; skip this hook itself so its patterns don't trip it.
 added=$(git diff --cached -U0 --diff-filter=ACMR -- . ':!.githooks/pre-commit' | grep -E '^\+[^+]' || true)
@@ -24,14 +26,28 @@ patterns=(
     'AKIA[0-9A-Z]{16}'                          # AWS
     '-----BEGIN [A-Z ]*PRIVATE KEY-----'
     '[Bb]earer [A-Za-z0-9._~+/-]{20,}'
-    '(API_KEY|APIKEY|SECRET|TOKEN|PASSWORD)[A-Z_]*[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9._~+/-]{12,}'
+    # NAME=value / NAME: value; the optional quote before =/: catches JSON and
+    # dict keys such as "ARCTRACKER_API_KEY": "..."
+    '(API_KEY|APIKEY|SECRET|TOKEN|PASSWORD)[A-Z_]*["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"']?[A-Za-z0-9._~+/-]{12,}'
 )
-for p in "${patterns[@]}"; do
-    if hits=$(grep -nE -- "$p" <<<"$added"); then
-        echo "pre-commit: possible secret matching /$p/:" >&2
+# Matched case-insensitively (api_key, Secret, ...). A quoted value is
+# required here, so code such as `secret = settings.api_key` is not flagged.
+ci_patterns=(
+    '(API_KEY|APIKEY|SECRET|TOKEN|PASSWORD)[A-Z_]*["'"'"']?[[:space:]]*[=:][[:space:]]*["'"'"'][A-Za-z0-9._~+/-]{12,}'
+)
+check() {  # check <grep flags> <pattern>
+    local hits
+    if hits=$(grep "$1" -- "$2" <<<"$added"); then
+        echo "pre-commit: possible secret matching /$2/:" >&2
         echo "$hits" | sed -E 's/([A-Za-z0-9._~+/-]{6})[A-Za-z0-9._~+/-]{6,}/\1…/g' >&2
         fail=1
     fi
+}
+for p in "${patterns[@]}"; do
+    check -nE "$p"
+done
+for p in "${ci_patterns[@]}"; do
+    check -niE "$p"
 done
 
 if (( fail )); then
