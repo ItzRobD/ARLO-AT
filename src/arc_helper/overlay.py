@@ -670,6 +670,11 @@ class OverlayWindow:
         self.overlay_x = x
         self.overlay_y = y
 
+    @property
+    def placed_anchor(self) -> tuple[int, int, int, int] | None:
+        """Panel bbox the popup sits beside, or None when not anchored."""
+        return self._placed_anchor
+
     def is_visible(self) -> bool:
         try:
             return self.window.winfo_viewable()

@@ -58,12 +58,40 @@ def find_tooltip(
     """
     sub = rgb[::step, ::step, :3]
     mask = np.all((sub >= CREAM_LO) & (sub <= CREAM_HI), axis=2)
-    min_px = max(4, int(rgb.shape[0] * MIN_SIZE_FRAC / step))
+    return _find_in_mask(mask, rgb.shape[0], step)
+
+
+def find_tooltips(
+    rgb: np.ndarray, *, step: int = 4, max_count: int = 2
+) -> list[tuple[int, int, int, int]]:
+    """Every cream panel on screen (up to ``max_count``), left to right.
+
+    The crafting screen shows the hovered blueprint's tooltip and the
+    selected blueprint's detail panel at once. Each panel found is blanked
+    out of the mask before searching for the next.
+    """
+    sub = rgb[::step, ::step, :3]
+    mask = np.all((sub >= CREAM_LO) & (sub <= CREAM_HI), axis=2)
+    found: list[tuple[int, int, int, int]] = []
+    for _ in range(max_count):
+        bbox = _find_in_mask(mask, rgb.shape[0], step)
+        if bbox is None:
+            break
+        found.append(bbox)
+        left, _, right, _ = (v // step for v in bbox)
+        mask[:, max(0, left - 2) : right + 2] = False
+    return sorted(found)
+
+
+def _find_in_mask(
+    mask: np.ndarray, frame_h: int, step: int
+) -> tuple[int, int, int, int] | None:
+    min_px = max(4, int(frame_h * MIN_SIZE_FRAC / step))
 
     row_counts = mask.sum(axis=1)
     if row_counts.max(initial=0) < min_px:
         return None
-    max_gap = max(1, MAX_GAP_PX * rgb.shape[0] // 1440 // step)
+    max_gap = max(1, MAX_GAP_PX * frame_h // 1440 // step)
     rows = _longest_run(row_counts >= row_counts.max() * ROW_FRAC, max_gap)
     if rows is None or rows[1] - rows[0] < min_px:
         return None

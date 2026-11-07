@@ -8,6 +8,7 @@ import hashlib
 import re
 import string
 import time
+from difflib import SequenceMatcher
 
 import numpy as np
 import pytesseract
@@ -26,6 +27,7 @@ from .tess_api import PSM_SINGLE_BLOCK
 from .tess_api import PSM_SINGLE_LINE
 from .tess_api import TessApi
 from .tooltip_finder import find_tooltip
+from .tooltip_finder import find_tooltips
 
 # A plain-pass token that is only Roman numeral look-alikes ("|", "Il", "lV")
 _NUMERAL_TOKEN = re.compile(r"[|l1!IiV]+")
@@ -123,6 +125,10 @@ class OCREngine:
         # Physical-pixel bbox of the last tooltip found by frame detection;
         # read (atomically) by the GUI thread to anchor the popup.
         self.last_tooltip_bbox: tuple[int, int, int, int] | None = None
+
+        # Crafting screen: panels seen last scan, and names per settled panel
+        self._prev_panels: list[tuple[int, int, int, int]] = []
+        self._panel_names: dict[tuple, str | None] = {}
 
         if self.debug_mode:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
@@ -556,6 +562,92 @@ class OCREngine:
             logger.debug(f"Extracted item name: '{item_name}'")
         return item_name
 
+    CRAFTING_WORD = "CRAFTING"
+    # Station header strip (left half, top 5%): "<STATION> - LEVEL n
+    # CRAFTING LEVEL UP". The station name's length moves the word, so the
+    # whole strip is read rather than a fixed trigger box.
+    HEADER_STRIP = (0.0, 0.0, 0.5, 0.05)
+
+    def check_crafting(self) -> bool:
+        """True while a workshop station's CRAFTING header is on screen."""
+        width, height = get_screen_resolution()
+        fx0, fy0, fx1, fy1 = self.HEADER_STRIP
+        bbox = (
+            int(width * fx0),
+            int(height * fy0),
+            int(width * fx1),
+            int(height * fy1),
+        )
+        image = self.preprocess_for_ocr(grab_screen(bbox), invert=True, scale=2)
+        try:
+            text = self.ocr_text(image, psm=PSM_SINGLE_LINE, upper=True)
+        except pytesseract.TesseractError:
+            return False
+        return self._contains_word(text, self.CRAFTING_WORD)
+
+    @staticmethod
+    def _contains_word(text: str, word: str, threshold: float = 0.85) -> bool:
+        """``word`` appears in ``text`` (spaces ignored), allowing an OCR slip."""
+        flat = re.sub(r"[^A-Z]", "", text.upper())
+        if word in flat:
+            return True
+        n = len(word)
+        return any(
+            SequenceMatcher(None, flat[i : i + n], word).ratio() >= threshold
+            for i in range(max(0, len(flat) - n + 1))
+        )
+
+    PANEL_NAME_CACHE_MAX = 32
+
+    def read_panel_names(self) -> list[tuple[str, tuple[int, int, int, int]]]:
+        """Crafting screen: (name, bbox) for every settled cream panel.
+
+        The hovered blueprint's tooltip and the selected blueprint's detail
+        panel can both be up. A panel is read once it holds still for two
+        scans; an unchanged panel reuses its name.
+        """
+        width, height = get_screen_resolution()
+        try:
+            frame = grab_frame_array(width, height)
+        except ScreenCaptureUnavailable:
+            raise
+        except OSError as e:
+            logger.error(f"Full-frame grab failed: {e}")
+            return []
+        panels = find_tooltips(frame)
+        prev, self._prev_panels = self._prev_panels, panels
+        found: list[tuple[str, tuple[int, int, int, int]]] = []
+        for bbox in panels:
+            if not any(
+                _bbox_close(bbox, p, self.ACCEPTED_TOLERANCE_PX) for p in prev
+            ):
+                continue  # new or still animating in
+            left, top, right, bottom = bbox
+            pad = 8
+            read_bottom = top + int((bottom - top) * self.TOOLTIP_READ_FRAC)
+            region = frame[
+                max(0, top - pad) : min(height, read_bottom),
+                max(0, left - pad) : min(width, right + pad),
+            ]
+            key = (
+                bbox,
+                hashlib.blake2b(region[::4, ::4].tobytes(), digest_size=16).digest(),
+            )
+            if key not in self._panel_names:
+                if len(self._panel_names) >= self.PANEL_NAME_CACHE_MAX:
+                    self._panel_names.clear()
+                image = Image.fromarray(np.ascontiguousarray(region), "RGB")
+                try:
+                    name = self._read_item_name(self.preprocess_tooltip(image))
+                except pytesseract.TesseractError as e:
+                    logger.error(f"OCR Error: {e}")
+                    continue
+                self._panel_names[key] = name
+            name = self._panel_names[key]
+            if name:
+                found.append((name, bbox))
+        return found
+
     def _log_bbox_jitter(
         self,
         old: tuple[int, int, int, int] | None,
@@ -631,8 +723,30 @@ class OCREngine:
 
         whitelisted = self.ocr_text(processed, upper=True)
         name_lines = [ln.strip() for ln in whitelisted.split("\n") if ln.strip()]
-        name = self._clean_text(" ".join(name_lines[: len(plain_names)]))
+        name = self._clean_text(
+            " ".join(self._matching_lines(name_lines, plain_names))
+        )
         return self._clean_text(self._merge_numeral(plain_names[-1], name)) or None
+
+    @staticmethod
+    def _matching_lines(lines: list[str], plain_names: list[str]) -> list[str]:
+        """The run of ``lines`` that best matches the plain pass's name lines.
+
+        Icon noise can add a junk line before the name in either pass, so the
+        two passes' lines do not always line up by position.
+        """
+        n = len(plain_names)
+        if len(lines) <= n:
+            return lines
+
+        def flat(parts: list[str]) -> str:
+            return re.sub(r"[^A-Z]", "", " ".join(parts).upper())
+
+        want = flat(plain_names)
+        return max(
+            (lines[i : i + n] for i in range(len(lines) - n + 1)),
+            key=lambda run: SequenceMatcher(None, flat(run), want).ratio(),
+        )
 
     @staticmethod
     def _merge_numeral(plain_name_line: str, upper_text: str) -> str:
@@ -667,12 +781,17 @@ class OCREngine:
         alpha = [c for c in text if c.isalpha()]
         return sum(c.isupper() for c in alpha) / len(alpha) if alpha else 0.0
 
+    # Lines shorter than this before the name are icon noise, not description
+    MAX_LEADING_JUNK = 8
+
     @classmethod
     def _name_lines(cls, text: str) -> list[str]:
         """The leading mostly-uppercase lines that form the item name, raw.
 
         Stops at the first lower-case line (the description), tolerating a
         stray mis-cased character (e.g. "II" read as "Il") via a ratio.
+        Short junk before the name (a tag icon read as "arn") is skipped;
+        the description's first line is far longer.
         Lines are returned uncleaned so a numeral read as "|" survives.
         """
         lines: list[str] = []
@@ -680,7 +799,7 @@ class OCREngine:
             line = cls._clean_text(raw_line)
             if len(line) >= 2 and cls._upper_ratio(line) >= 0.6:
                 lines.append(raw_line.strip())
-            elif lines or len(line) >= 2:
+            elif lines or len(line) >= cls.MAX_LEADING_JUNK:
                 break
         return lines
 

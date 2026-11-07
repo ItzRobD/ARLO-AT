@@ -162,6 +162,8 @@ class Scanner:
 
     # Hotkey override (Ctrl+Shift to force tooltip scanning)
     _hotkey_override: bool = False
+    # Active because a workshop station's CRAFTING tab is open (not INVENTORY)
+    _crafting: bool = False
 
     # Thread control
     _running: bool = False
@@ -228,11 +230,20 @@ class Scanner:
                     ):
                         # Trigger detected! Switch to active mode
                         self._hotkey_override = False
+                        self._crafting = False
                         self.state = ScannerState.ACTIVE
                         self._update_status("active")
                         logger.info("INVENTORY detected - activating tooltip scanner")
                         if self.advisor is not None:
                             self.advisor.request_refresh()  # throttled
+                    elif self.advisor is not None and ocr.check_crafting():
+                        # Crafting popups need personal data (crafts to target)
+                        self._hotkey_override = False
+                        self._crafting = True
+                        self.state = ScannerState.ACTIVE
+                        self._update_status("active")
+                        logger.info("CRAFTING detected - activating panel scanner")
+                        self.advisor.request_refresh()  # throttled
                     else:
                         # Wait before next trigger scan
                         time.sleep(settings.scan.trigger_scan_interval)
@@ -260,15 +271,27 @@ class Scanner:
                         )
                         if should_check_trigger:
                             self._last_trigger_check = now
-                        if should_check_trigger and not ocr.check_trigger_any(
-                            [settings.trigger_region, settings.trigger_region2]
+                        if should_check_trigger and not (
+                            ocr.check_crafting()
+                            if self._crafting
+                            else ocr.check_trigger_any(
+                                [settings.trigger_region, settings.trigger_region2]
+                            )
                         ):
-                            # Inventory closed, go back to idle
+                            # Inventory / crafting closed, go back to idle
+                            screen = "CRAFTING" if self._crafting else "INVENTORY"
+                            self._crafting = False
                             self.state = ScannerState.IDLE
                             self._update_status("scanning")
                             self._hide_overlay()
-                            logger.info("INVENTORY closed - returning to idle")
+                            logger.info(f"{screen} closed - returning to idle")
                             continue
+
+                    if self._crafting:
+                        self._show_panels(ocr.read_panel_names())
+                        self.stats.tooltip_scans += 1
+                        time.sleep(settings.scan.tooltip_scan_interval)
+                        continue
 
                     item_name = ocr.read_hovered_item_name()
                     self.stats.tooltip_scans += 1
@@ -350,6 +373,21 @@ class Scanner:
         self._last_shown_item = item_name
         self._last_shown_time = current_time
 
+    def _show_panels(
+        self, panels: list[tuple[str, tuple[int, int, int, int]]]
+    ) -> None:
+        """Crafting screen: a crafts-to-target popup beside each panel."""
+        entries = []
+        for name, bbox in panels:
+            res = self.advisor.lookup(name, crafting=True) if self.advisor else None
+            if res is not None:
+                entries.append((name, *res, bbox))
+        if entries:
+            self._overlay_visible = True
+            self.ui_queue.put(("panels", entries))
+        else:
+            self._hide_overlay()
+
     def _db_lookup(self, item_name: str) -> Item | None:
         """Generic database lookup, memoised by OCR'd name."""
         if item_name not in self._lookup_cache:
@@ -397,6 +435,11 @@ class Scanner:
         self.ui_queue.put(("status", status))
 
 
+def _near(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    """Same panel: top-left corners within 40 px."""
+    return abs(a[0] - b[0]) <= 40 and abs(a[1] - b[1]) <= 40
+
+
 class Application:
     """Main application controller."""
 
@@ -417,6 +460,8 @@ class Application:
 
         # Create overlay and status windows
         self.overlay = OverlayWindow(self.root)
+        # Crafting screen: hovered tooltip and selected panel get one each
+        self.overlay2 = OverlayWindow(self.root)
         self.status = StatusWindow(self.root, on_quit=self.quit)
 
         # Debug overlay for visualizing capture area (separate from debug_mode)
@@ -461,11 +506,45 @@ class Application:
                     self.overlay.show(msg[1], msg[2], anchor=msg[3])
                 elif msg[0] == "verdict":
                     self.overlay.show_verdict(*msg[1:5], anchor=msg[5])
+                elif msg[0] == "panels":
+                    self._show_panels(msg[1])
                 elif msg[0] == "hide":
                     self.overlay.hide()
+                    self.overlay2.hide()
         except queue.Empty:
             pass
         self.root.after(20, self._pump_ui_queue)
+
+    def _show_panels(self, entries: list[tuple]) -> None:
+        """One popup per crafting panel; a popup stays with its panel.
+
+        Entries are (name, verdict, age, stale, anchor). Each keeps the popup
+        already beside the same panel, so hovering in and out does not swap
+        the two popups' contents.
+        """
+        free = [self.overlay, self.overlay2]
+        pending = []
+        for entry in entries:
+            anchor = entry[4]
+            match = next(
+                (
+                    ow
+                    for ow in free
+                    if ow.placed_anchor is not None
+                    and _near(ow.placed_anchor, anchor)
+                ),
+                None,
+            )
+            if match is None:
+                pending.append(entry)
+                continue
+            free.remove(match)
+            match.show_verdict(*entry[:4], anchor=anchor)
+        for entry in pending:
+            if free:
+                free.pop(0).show_verdict(*entry[:4], anchor=entry[4])
+        for ow in free:
+            ow.hide()
 
     def run(self) -> None:
         """Start the application."""
