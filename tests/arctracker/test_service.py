@@ -221,8 +221,19 @@ def test_lookup_is_fast(tmp_path):
     assert time.perf_counter() - start < 5
 
 
-def test_unknown_name_is_none(tmp_path):
+def test_unknown_name_with_personal_data_is_unknown_verdict(tmp_path):
     svc = _service(tmp_path, FakeClient())
+    svc.step()
+    verdict, _age, _stale = svc.lookup("NOT AN ITEM AT ALL")
+    assert (verdict.kind, verdict.title, verdict.reason) == (
+        VerdictKind.UNKNOWN,
+        "Unknown",
+        "Not in ARC Tracker data",
+    )
+
+
+def test_unknown_name_without_personal_data_is_none(tmp_path):
+    svc = _service(tmp_path, FakeClient(default=ArcTrackerError("offline")))
     svc.step()
     assert svc.lookup("NOT AN ITEM AT ALL") is None
 
@@ -429,3 +440,38 @@ def test_scheduled_refresh_waits_for_window_room(tmp_path, monkeypatch):
     assert _max_window(times, 20) <= 100
     assert times[:5] == [0, 30, 60, 90, 120]
     assert times[5] == 600  # window full until the t=0 calls age out
+
+
+def test_raising_verdict_logs_once_per_plan(tmp_path, caplog, monkeypatch):
+    from arc_helper.arctracker import service
+
+    def boom(_plan, _item_id):
+        msg = "bad verdict"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(service, "verdict_for", boom)
+    svc = _service(tmp_path, FakeClient())
+    svc.step()
+    with caplog.at_level(logging.ERROR):
+        for _ in range(50):  # ~5 s of frame-mode scans
+            assert svc.lookup("CANISTER") is None
+    failures = [r for r in caplog.records if "verdict failed" in r.getMessage()]
+    assert len(failures) == 1
+
+
+def test_catalogue_json_parsed_once_at_startup(tmp_path, monkeypatch):
+    from arc_helper.arctracker.catalogue import Catalogue
+
+    _write_catalogue_cache(tmp_path)  # fresh cache: no download due
+    parses = []
+    orig = Catalogue.from_api_json
+    monkeypatch.setattr(
+        Catalogue,
+        "from_api_json",
+        classmethod(lambda _cls, d: parses.append(1) or orig(d)),
+    )
+    clock = Clock()
+    svc = AdvisorService(_settings(tmp_path), client=FakeClient(), clock=clock)
+    _run(svc, clock, 3)
+    assert parses == [1]
+    assert svc.lookup("CANISTER") is not None

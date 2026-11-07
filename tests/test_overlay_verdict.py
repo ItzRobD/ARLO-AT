@@ -433,3 +433,20 @@ def test_quit_stops_advisor_when_scanner_stop_interrupted(monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         app.quit()
     assert stopped == [True]
+
+
+def _unknown_verdict() -> Verdict:
+    return Verdict(VerdictKind.UNKNOWN, "Unknown", "Not in ARC Tracker data", "", "")
+
+
+def test_scanner_unresolved_with_personal_data_shows_unknown(monkeypatch):
+    v = _unknown_verdict()
+    db = FakeDb(Item(name="Mystery", action="Sell"))
+    sc = _scanner(monkeypatch, FakeAdvisor((v, "⟳ 12m", False)), db)
+    sc._handle_detected_item("MYSTERY")
+    sc._handle_detected_item("MYSTERY")  # frame-mode re-show: no relog
+    msgs = _drain(sc.ui_queue)
+    assert [m[:3] for m in msgs] == [("verdict", "MYSTERY", v)] * 2
+    assert db.lookups == 0  # no generic LIKE / fuzzy fallback
+    assert db.missing == ["MYSTERY"]
+    assert sc.stats.items_found_in_db == 0

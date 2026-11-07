@@ -690,10 +690,20 @@ def test_copies_zero_loadout_is_not_a_keep(plan):
     v = verdict_for(plan(rules=rules), "medium_shield")
     assert (v.kind, v.reason) == (K.NO_RULE, "No rule for this item")
     v = verdict_for(plan(owned={"medium_shield": 2}, rules=rules), "medium_shield")
-    assert v.kind is K.NO_RULE
+    assert (v.kind, v.title, v.reason) == (
+        K.NO_RULE,
+        "No rule",
+        "Loadout · craft on demand",
+    )
     rules = "loadout: {heals: {items: [herbal_bandage], copies: 0}}"
     v = verdict_for(plan(rules=rules), "herbal_bandage")
     assert (v.kind, v.title, v.reason) == (K.SELL, "Sell", "Surplus")
+    v = verdict_for(plan(owned={"herbal_bandage": 3}, rules=rules), "herbal_bandage")
+    assert (v.kind, v.title, v.reason) == (
+        K.SELL,
+        "Sell 3",
+        "Loadout · craft on demand",
+    )
 
 
 def test_made_from_pip_per_ingredient(plan):
@@ -749,3 +759,16 @@ def test_craft_yield_hint_and_pips(plan):
     v = verdict_for(p, "light_ammo")
     assert all(r.state == "covers" for r in v.made_from)
     assert (v.hint, v.hint_state) == ("Craft 2 now → 60 / 60", "covers")
+
+
+def test_hint_hidden_when_bench_level_unknown(plan):
+    # light gun parts craft at the refiner; progress lists only the gunsmith
+    p = plan(
+        owned={"light_gun_parts": 21, "simple_gun_parts": 24},
+        rules=LIGHT,
+        learned={"light_gun_parts"},
+        benches={"weapon_bench": 3},
+    )
+    v = verdict_for(p, "light_gun_parts")
+    assert (v.hint, v.hint_state) == (None, None)
+    assert v.made_from != ()  # the rows still show

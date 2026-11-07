@@ -126,7 +126,8 @@ def parse_progress(
     learned = frozenset(
         i["id"] for i in bp.get("items") or [] if isinstance(i, dict) and "id" in i
     )
-    complete = not bp.get("namesTruncated", False)
+    # A missing section is unknown, not "every blueprint listed".
+    complete = bool(bp) and not bp.get("namesTruncated", False)
     benches = {
         m["id"]: m["level"]
         for m in (workshop.get("workshop") or {}).get("modules") or []

@@ -182,16 +182,34 @@ def _load(path: Path) -> Catalogue | None:
         return None
 
 
+def _downloaded(data: dict[str, Any]) -> Catalogue:
+    """Parse a download; one with no items counts as failed (cache kept)."""
+    catalogue = Catalogue.from_api_json(data)
+    if not catalogue.items:
+        msg = "catalogue download has no items"
+        raise ValueError(msg)
+    return catalogue
+
+
 def fetch_catalogue(
-    cache_dir: Path, *, max_age_s: int = 86400, session: Any = None
+    cache_dir: Path,
+    *,
+    max_age_s: int = 86400,
+    session: Any = None,
+    current: tuple[Catalogue, int] | None = None,
 ) -> Catalogue | None:
     """Return the catalogue from a fresh cache, else download it.
 
-    On download failure falls back to the stale cache, or None.
+    ``current`` is (catalogue, cache mtime_ns it was read from): while the
+    cache is fresh and unchanged it is returned as is, without re-parsing.
+    A download with no items counts as failed. On download failure falls back
+    to the stale cache, or None.
     """
     path = cache_dir / "catalogue.json"
     cached = path.exists()
     if cached and time.time() - path.stat().st_mtime < max_age_s:
+        if current is not None and path.stat().st_mtime_ns == current[1]:
+            return current[0]
         fresh = _load(path)
         if fresh is not None:
             return fresh
@@ -201,7 +219,7 @@ def fetch_catalogue(
         resp = session.get(API_URL, timeout=30, headers={"User-Agent": USER_AGENT})
         resp.raise_for_status()
         data = resp.json()
-        catalogue = Catalogue.from_api_json(data)
+        catalogue = _downloaded(data)
         cache_dir.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
         try:

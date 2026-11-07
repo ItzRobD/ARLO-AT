@@ -40,6 +40,7 @@ from arc_helper.arctracker.snapshot import parse_progress
 from arc_helper.arctracker.snapshot import parse_tracking
 from arc_helper.arctracker.snapshot import save_snapshot
 from arc_helper.arctracker.verdict import Verdict
+from arc_helper.arctracker.verdict import unknown_verdict
 from arc_helper.arctracker.verdict import verdict_for
 
 if TYPE_CHECKING:
@@ -69,18 +70,32 @@ class _Live:
     plan only, so they need no clearing or locking."""
 
     plan: Plan
-    verdicts: dict[str, Verdict] = field(default_factory=dict)
+    # item id -> verdict; None marks a verdict_for that raised (logged once)
+    verdicts: dict[str, Verdict | None] = field(default_factory=dict)
     resolved: dict[str, str | None] = field(default_factory=dict)
 
 
-def _read_cached_catalogue(path: Path) -> Catalogue | None:
-    if not path.exists():
+_UNKNOWN = unknown_verdict()
+
+
+def _mtime_ns(path: Path) -> int | None:
+    try:
+        return path.stat().st_mtime_ns
+    except OSError:
+        return None
+
+
+def _read_cached_catalogue(path: Path) -> tuple[Catalogue, int] | None:
+    """The cached catalogue and the mtime_ns it was read at."""
+    mtime = _mtime_ns(path)
+    if mtime is None:
         return None
     try:
-        return Catalogue.from_api_json(json.loads(path.read_text(encoding="utf-8")))
+        cat = Catalogue.from_api_json(json.loads(path.read_text(encoding="utf-8")))
     except (OSError, ValueError, KeyError, TypeError):
         logger.warning("Unreadable catalogue cache %s", path)
         return None
+    return cat, mtime
 
 
 class AdvisorService:
@@ -98,6 +113,7 @@ class AdvisorService:
         self._redact_key = key  # only used to scrub text before logging
         self._cache_dir = Path(settings.arctracker_cache_dir)
         self._snapshot_path = self._cache_dir / "snapshot.json"
+        self._catalogue_path = self._cache_dir / "catalogue.json"
         self._clock = clock
         self._catalogue_loader = catalogue_loader
         if client is None and self._has_key:
@@ -116,6 +132,7 @@ class AdvisorService:
         self._no_key_logged = False
 
         self._catalogue: Catalogue | None = None
+        self._catalogue_mtime_ns: int | None = None  # cache file it came from
         self._snapshot: PlayerSnapshot | None = None
         self._empty_rules: tuple[Catalogue, Rules] | None = None
         self._built_from: tuple[object, object, object] | None = None
@@ -128,7 +145,9 @@ class AdvisorService:
         if not self._has_key:
             return  # no key: never load the catalogue or contact arctracker.io
         # Startup: cached data first, so lookup works offline immediately.
-        self._catalogue = _read_cached_catalogue(self._cache_dir / "catalogue.json")
+        cached = _read_cached_catalogue(self._catalogue_path)
+        if cached is not None:
+            self._catalogue, self._catalogue_mtime_ns = cached
         if self._snapshot_path.exists():
             self._snapshot = load_snapshot(self._snapshot_path)
         self._rebuild()
@@ -139,6 +158,11 @@ class AdvisorService:
     # -- scanner-thread API ------------------------------------------------
 
     def lookup(self, ocr_name: str) -> tuple[Verdict, str, bool] | None:
+        """Verdict, age label and staleness; None without personal data.
+
+        With personal data, a name the catalogue cannot resolve gets the
+        Unknown verdict (never the generic database's fuzzy match).
+        """
         live = self._live  # the single read; never changes under us
         if live is None:
             return None
@@ -149,15 +173,26 @@ class AdvisorService:
                 if len(live.resolved) >= RESOLVE_MEMO_MAX:
                     live.resolved.clear()
                 live.resolved[ocr_name] = item_id
-            if item_id is None:
-                return None
-            verdict = live.verdicts.get(item_id)
-            if verdict is None:
-                verdict = verdict_for(live.plan, item_id)
-                live.verdicts[item_id] = verdict
         except Exception:
-            logger.exception("ARC Tracker verdict failed for %r", ocr_name)
+            logger.exception("ARC Tracker name resolution failed for %r", ocr_name)
             return None
+        if item_id is None:
+            verdict = _UNKNOWN
+        else:
+            verdict = live.verdicts.get(item_id, _MISSING)
+            if verdict is _MISSING:
+                try:
+                    verdict = verdict_for(live.plan, item_id)
+                except Exception:
+                    logger.exception(
+                        "ARC Tracker verdict failed for %r; not retried until "
+                        "the data changes",
+                        ocr_name,
+                    )
+                    verdict = None
+                live.verdicts[item_id] = verdict
+            if verdict is None:
+                return None
         snap = live.plan.snapshot
         now = datetime.fromtimestamp(self._clock(), UTC)
         label, stale = format_age(snap.synced_at if snap else None, now)
@@ -257,8 +292,11 @@ class AdvisorService:
     def _refresh_catalogue(self, now: float) -> None:
         # Scheduled first, so a loader that raises is retried at most every 300 s.
         self._next_catalogue = now + CATALOGUE_ERROR_RETRY_S
+        current = self._catalogue
+        mtime = self._catalogue_mtime_ns
+        reuse = (current, mtime) if current is not None and mtime is not None else None
         try:
-            cat = self._catalogue_loader(self._cache_dir)
+            cat = self._catalogue_loader(self._cache_dir, current=reuse)
         except Exception as exc:  # noqa: BLE001 - never let the catalogue stall the loop
             logger.warning(
                 "ARC Tracker catalogue load failed, retry in %ss: %s: %s",
@@ -272,6 +310,9 @@ class AdvisorService:
             return
         self._next_catalogue = now + CATALOGUE_REFRESH_S
         old = self._catalogue
+        if cat is old:
+            return
+        self._catalogue_mtime_ns = _mtime_ns(self._catalogue_path)
         if old is None or cat.version != old.version or not cat.version:
             self._catalogue = cat
 

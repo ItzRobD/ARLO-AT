@@ -150,3 +150,43 @@ def test_is_weapon_from_firearm_classification(cat):
 def test_craft_quantity_parsed(cat):
     assert cat.items["light_ammo"].craft_quantity == 25
     assert cat.items["light_gun_parts"].craft_quantity == 1  # no craftQuantity
+
+
+def test_empty_download_keeps_old_cache(tmp_path, raw):
+    assert fetch_catalogue(tmp_path, session=_Session(data=raw)) is not None
+    path = tmp_path / "catalogue.json"
+    old = time.time() - 10 * 86400
+    os.utime(path, (old, old))
+    before = path.read_bytes()
+    empty = _Session(data={"items": [], "version": "x"})
+    got = fetch_catalogue(tmp_path, session=empty)
+    assert empty.calls == 1
+    assert got is not None
+    assert "canister" in got.items  # the stale cache, not the empty download
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime == pytest.approx(old)
+
+
+def test_empty_download_without_cache_is_none(tmp_path):
+    assert fetch_catalogue(tmp_path, session=_Session(data={"items": []})) is None
+    assert not (tmp_path / "catalogue.json").exists()
+
+
+def test_fresh_cache_reuses_current_catalogue(tmp_path, raw, monkeypatch):
+    first = fetch_catalogue(tmp_path, session=_Session(data=raw))
+    mtime = (tmp_path / "catalogue.json").stat().st_mtime_ns
+    parses = []
+    orig = Catalogue.from_api_json
+    monkeypatch.setattr(
+        Catalogue,
+        "from_api_json",
+        classmethod(lambda _cls, d: parses.append(1) or orig(d)),
+    )
+    never = _Session(error=AssertionError("must not fetch"))
+    got = fetch_catalogue(tmp_path, session=never, current=(first, mtime))
+    assert got is first
+    assert parses == []
+    # a cache rewritten since `current` was read is parsed again
+    got = fetch_catalogue(tmp_path, session=never, current=(first, mtime - 1))
+    assert got is not first
+    assert parses == [1]

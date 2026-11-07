@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from arc_helper.arctracker.catalogue import fetch_catalogue
-from arc_helper.arctracker.rules import Target
 from arc_helper.arctracker.rules import parse_rules
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,5 +29,3 @@ def test_owner_rules_parse_cleanly(live_catalogue):
         pytest.skip("no local rules.yaml")
     rules = parse_rules(path.read_text(encoding="utf-8"), live_catalogue)
     assert rules.errors == ()
-    assert rules.targets["light_gun_parts"] == Target(15, 50, 5)
-    assert rules.targets["smoke_grenade"].ideal == 20

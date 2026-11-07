@@ -27,6 +27,8 @@ LOADOUT_MAX_TIER = 3  # planner tiers 2 (weapons) and 3 (other loadout groups)
 NO_RULE_TYPES = frozenset({"Blueprint", "Modification", "Augment", "Shield"})
 MAX_CRAFT_ROWS = 3
 TIMES = "\N{MULTIPLICATION SIGN}"  # the popup copy uses U+00D7
+IN_RAID = "in_raid"  # a craftBench entry that is no workshop module
+ON_DEMAND = "Loadout · craft on demand"  # owned item of a copies: 0 group
 
 NEED_KINDS = {
     "quest": "Quest",
@@ -186,7 +188,10 @@ def _hint(
     if snap is None or not (snap.bench_levels or snap.learned_blueprints):
         return None, None  # no progress data
     if item.station_level is not None:
-        known = [b for b in item.benches if b in snap.bench_levels]
+        benches = [b for b in item.benches if b != IN_RAID]
+        known = [b for b in benches if b in snap.bench_levels]
+        if benches and not known:
+            return None, None  # craft bench level unknown: no data, no hint
         if known and all(snap.bench_levels[b] < item.station_level for b in known):
             bench = BENCH_NAMES.get(known[0], known[0])
             return f"Needs {bench} {item.station_level}", None
@@ -253,16 +258,17 @@ def _recycle_value(plan: Plan, item: CatalogueItem) -> int:
     return sum(q * items[k].value for k, q in item.recycles_into.items() if k in items)
 
 
+def unknown_verdict(category: str = "") -> Verdict:
+    """Grey verdict for an item ARC Tracker data does not know."""
+    return Verdict(
+        VerdictKind.UNKNOWN, "Unknown", "Not in ARC Tracker data", "", category
+    )
+
+
 def verdict_for(plan: Plan, item_id: str) -> Verdict:
     item = plan.catalogue.items.get(item_id)
     if item is None:
-        return Verdict(
-            VerdictKind.UNKNOWN,
-            "Unknown",
-            "Not in ARC Tracker data",
-            "",
-            plan.rules.categories.get(item_id, ""),
-        )
+        return unknown_verdict(plan.rules.categories.get(item_id, ""))
     kind, title, reason, counts = _decide(plan, item)
     made_from, hint, hint_state = _made_from(plan, item_id)
     return Verdict(
@@ -302,6 +308,8 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
 
     # 2. Loadout item (copies > 0), and lower-tier copies of a loadout weapon.
     ruled = t is not None and t.ideal > 0  # a copies: 0 loadout is no target
+    # owned, and in a copies: 0 loadout group (crafted only when needed)
+    on_demand = owned > 0 and t is not None and t.ideal == 0 and _is_loadout(t)
     if ruled and t is not None and _is_loadout(t) and owned <= t.ideal:
         k, title = _STATE_KIND[t.state]
         return (
@@ -360,7 +368,7 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
         return (
             VerdictKind.NO_RULE,
             "No rule",
-            "No rule for this item",
+            ON_DEMAND if on_demand else "No rule for this item",
             f"Own {owned} · {value}",
         )
 
@@ -376,6 +384,8 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
             )
         if ruled:
             why = "Above reserve"
+        elif on_demand:
+            why = ON_DEMAND
         elif action is not None:
             why = f"Rule · {action.replace('_', ' ')}"
         else:
@@ -401,6 +411,8 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
         why = _need_reason(need)
     elif ruled and t is not None and _is_loadout(t):
         why = f"Loadout · {_copies(t.ideal)}"
+    elif on_demand:
+        why = ON_DEMAND
     elif t is not None:
         why = note or "Reserve target"
     else:

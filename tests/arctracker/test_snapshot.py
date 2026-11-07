@@ -152,3 +152,10 @@ def test_format_age(delta, label, stale):
 
 def test_format_age_none():
     assert format_age(None, NOW) == ("⟳ —", False)
+
+
+def test_missing_blueprints_section_is_not_complete():
+    assert parse_progress({}, {})[1] is False
+    assert parse_progress({"blueprints": None}, {})[1] is False
+    full = {"blueprints": {"items": [{"id": "anvil_i"}], "namesTruncated": False}}
+    assert parse_progress(full, {})[1] is True

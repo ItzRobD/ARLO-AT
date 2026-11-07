@@ -19,6 +19,8 @@ from threading import Thread
 from dotenv import load_dotenv
 
 from arc_helper.arctracker import AdvisorService
+from arc_helper.arctracker.verdict import Verdict
+from arc_helper.arctracker.verdict import VerdictKind
 from arc_helper.clickthrough import make_click_through
 from arc_helper.clickthrough import make_outline
 from arc_helper.config import APP_DIR
@@ -299,7 +301,7 @@ class Scanner:
         if ocr.detection != "cursor" and item_name == self._last_shown_item:
             # Frame mode: the tooltip is still up, so keep the popup up
             # (an unchanged popup only repositions and extends its timer).
-            if not self._show_verdict(item_name, ocr.last_tooltip_bbox):
+            if self._show_verdict(item_name, ocr.last_tooltip_bbox) is None:
                 self._show_overlay(
                     item_name, self._db_lookup(item_name), ocr.last_tooltip_bbox
                 )
@@ -317,10 +319,16 @@ class Scanner:
         self.stats.last_item = item_name
         self.stats.last_item_time = current_time
 
-        # Personal verdict first; the generic database is the fallback
-        if self._show_verdict(item_name, ocr.last_tooltip_bbox):
-            self.stats.items_found_in_db += 1  # a resolved item counts as found
-            logger.debug(f"Verdict: {item_name}")
+        # Personal verdict first; the generic database is the fallback only
+        # without personal data (with it, an unresolved name shows Unknown)
+        verdict = self._show_verdict(item_name, ocr.last_tooltip_bbox)
+        if verdict is not None:
+            if verdict.kind is VerdictKind.UNKNOWN:
+                logger.debug(f"Not in ARC Tracker data: {item_name}")
+                self.db.log_missing_item(item_name)
+            else:
+                self.stats.items_found_in_db += 1  # a resolved item is found
+                logger.debug(f"Verdict: {item_name}")
             self._last_shown_item = item_name
             self._last_shown_time = current_time
             return
@@ -350,22 +358,22 @@ class Scanner:
 
     def _show_verdict(
         self, item_name: str, anchor: tuple[int, int, int, int] | None
-    ) -> bool:
-        """Queue the personal verdict; False when there is none to show.
+    ) -> Verdict | None:
+        """Queue the personal verdict and return it; None when there is none.
 
         The advisor memoises verdicts per data set, so calling this every
         frame-mode scan is cheap, and the overlay skips the redraw while
         (item, verdict, age, stale) is unchanged.
         """
         if self.advisor is None:
-            return False
+            return None
         res = self.advisor.lookup(item_name)
         if res is None:
-            return False
+            return None
         verdict, age, stale = res
         self._overlay_visible = True
         self.ui_queue.put(("verdict", item_name, verdict, age, stale, anchor))
-        return True
+        return verdict
 
     def _show_overlay(
         self,
