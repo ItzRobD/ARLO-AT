@@ -7,6 +7,7 @@ damage, so pipewiresrc's keepalive re-pushes the last frame periodically.
 
 import threading
 
+import numpy as np
 from PIL import Image
 
 from arc_helper.config import logger
@@ -57,6 +58,9 @@ class WaylandBackend:
         self._pipeline: Gst.Element | None = None
         self._lock = threading.Lock()
         self._frame: tuple[bytes, int, int, int] | None = None  # data, w, h, stride
+        # Newest undecoded GstSample. Frames are only copied out of it when
+        # grab() needs one, not for every frame the compositor sends.
+        self._sample = None
         self._first_frame = threading.Event()
         self._size: tuple[int, int] = (0, 0)
         self._tk_scale = 1.0
@@ -67,6 +71,7 @@ class WaylandBackend:
     def start(self) -> None:
         Gst.init(None)
         self._frame = None
+        self._sample = None
         self._first_frame = threading.Event()
 
         try:
@@ -157,19 +162,40 @@ class WaylandBackend:
             self._session.close()
             self._session = None
 
-    def grab(self, bbox: tuple[int, int, int, int]) -> Image.Image:
+    def _latest_frame(self) -> tuple[bytes, int, int, int]:
         if self._terminal_error is not None:
             raise ScreenCaptureUnavailable(self._terminal_error)
         session = self._session  # local ref: stop() may null it concurrently
         if session is not None and session.closed.is_set():
             self._attempt_restart()
         with self._lock:
+            sample, self._sample = self._sample, None
+        if sample is not None:
+            decoded = self._decode(sample)
+            if decoded is not None:
+                with self._lock:
+                    self._frame = decoded
+        with self._lock:
             frame = self._frame
         if frame is None:
             msg = "No frame received from the compositor yet"
             raise OSError(msg)
-        data, width, height, stride = frame
+        return frame
+
+    def grab(self, bbox: tuple[int, int, int, int]) -> Image.Image:
+        data, width, height, stride = self._latest_frame()
         return crop_bgrx(data, width, height, stride, bbox)
+
+    def frame_array(self) -> np.ndarray:
+        """Whole frame as an HxWx3 RGB numpy *view* (no copy).
+
+        Frames are immutable bytes replaced wholesale per sample, so the
+        view stays valid while the caller holds it.
+        """
+        data, width, height, stride = self._latest_frame()
+        rows = np.frombuffer(data, dtype=np.uint8)[: height * stride]
+        pixels = rows.reshape(height, stride)[:, : width * 4]
+        return pixels.reshape(height, width, 4)[:, :, 2::-1]
 
     def cursor_position(self) -> Point:
         # Wayland has no global cursor query. Xlib coordinates are valid
@@ -201,6 +227,22 @@ class WaylandBackend:
         sample = sink.emit("pull-sample")
         if sample is None:
             return Gst.FlowReturn.OK
+        if not self._first_frame.is_set():
+            # start() needs a decoded frame to learn the stream size
+            decoded = self._decode(sample)
+            if decoded is None:
+                return Gst.FlowReturn.OK
+            with self._lock:
+                self._frame = decoded
+            self._first_frame.set()
+            return Gst.FlowReturn.OK
+        with self._lock:
+            self._sample = sample  # replaces (and releases) any unread one
+        return Gst.FlowReturn.OK
+
+    @staticmethod
+    def _decode(sample) -> tuple[bytes, int, int, int] | None:
+        """Copy a sample's BGRx pixels out: (data, width, height, stride)."""
         buf = sample.get_buffer()
         structure = sample.get_caps().get_structure(0)
         width = structure.get_value("width")
@@ -209,17 +251,14 @@ class WaylandBackend:
         stride = meta.stride[0] if meta else width * 4
         ok, mapinfo = buf.map(Gst.MapFlags.READ)
         if not ok:
-            return Gst.FlowReturn.OK
+            return None
         try:
             data = bytes(mapinfo.data)
         finally:
             buf.unmap(mapinfo)
         if len(data) < height * stride and height > 0:
             stride = len(data) // height  # defensive: tightly packed buffer
-        with self._lock:
-            self._frame = (data, width, height, stride)
-        self._first_frame.set()
-        return Gst.FlowReturn.OK
+        return (data, width, height, stride)
 
     def _collect_bus_error(self) -> str:
         if self._pipeline is None:
