@@ -241,22 +241,34 @@ class RulesWatcher:
         self._mtime_ns: int | None = None
         self._catalogue: Catalogue | None = None
         self._rules: Rules | None = None
+        self._logged_failure: str | None = None
+
+    def _warn_once(self, key: str, msg: str, *args: object) -> None:
+        if key != self._logged_failure:
+            self._logged_failure = key
+            logger.warning(msg, *args)
 
     def current(self, catalogue: Catalogue) -> Rules | None:
         try:
             mtime = self.path.stat().st_mtime_ns
-        except OSError:
+        except OSError as exc:
+            self._warn_once(
+                f"stat:{exc.errno}", "Rules file %s unavailable: %s", self.path, exc
+            )
             return self._rules
         if mtime == self._mtime_ns and catalogue is self._catalogue:
             return self._rules
         try:
             text = self.path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            logger.warning("Cannot read rules file %s: %s", self.path, exc)
+            self._warn_once(
+                f"read:{exc}", "Cannot read rules file %s: %s", self.path, exc
+            )
             return self._rules
         # Failed parses are remembered too, so a broken file is not re-parsed.
         self._mtime_ns = mtime
         self._catalogue = catalogue
+        self._logged_failure = None
         try:
             rules = parse_rules(text, catalogue)
         except Exception as exc:  # noqa: BLE001 - any parse failure keeps old rules

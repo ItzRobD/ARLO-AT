@@ -197,3 +197,26 @@ def test_watcher_retries_read_after_oserror(tmp_path, cat, monkeypatch):
     assert w.current(cat) is None
     monkeypatch.setattr(type(p), "read_text", real)
     assert w.current(cat).targets["oil"].ideal == 3
+
+
+def test_missing_file_logs_once(tmp_path, cat, caplog):
+    w = RulesWatcher(tmp_path / "nope.yaml")
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            assert w.current(cat) is None
+    assert len(caplog.records) == 1
+
+
+def test_persistent_read_failure_logs_once(tmp_path, cat, monkeypatch, caplog):
+    p = tmp_path / "rules.yaml"
+    p.write_text("oil: {target: 3}\n")
+    w = RulesWatcher(p)
+
+    def boom(*_args, **_kwargs):
+        raise OSError
+
+    monkeypatch.setattr(type(p), "read_text", boom)
+    with caplog.at_level("WARNING"):
+        for _ in range(3):
+            w.current(cat)
+    assert len(caplog.records) == 1
