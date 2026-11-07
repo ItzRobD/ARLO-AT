@@ -18,7 +18,7 @@ dependencies = [
     "evdev>=1.6; sys_platform == 'linux'",
     "python-xlib>=0.17; sys_platform == 'linux'",
     "pyyaml>=6.0",
-    "mcp>=1.10",
+    "mcp>=2.3",
 ]
 
 [project.optional-dependencies]

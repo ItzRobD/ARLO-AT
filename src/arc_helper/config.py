@@ -11,6 +11,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from pydantic import Field
+from pydantic import SecretStr
 from pydantic_settings import BaseSettings
 from pydantic_settings import SettingsConfigDict
 
@@ -270,7 +271,7 @@ class Settings(BaseSettings):
     )
 
     # ARC Tracker integration
-    arctracker_api_key: str | None = Field(
+    arctracker_api_key: SecretStr | None = Field(
         default=None, description="ARC Tracker developer access key"
     )
     arctracker_mcp_url: str = Field(default="https://mcp.arctracker.io/mcp")

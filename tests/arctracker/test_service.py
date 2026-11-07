@@ -1,0 +1,296 @@
+import json
+import logging
+import os
+import shutil
+import time
+from datetime import UTC
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+
+from arc_helper.arctracker.mcp_client import ArcTrackerAuthError
+from arc_helper.arctracker.mcp_client import ArcTrackerError
+from arc_helper.arctracker.service import AdvisorService
+from arc_helper.arctracker.snapshot import PlayerSnapshot
+from arc_helper.arctracker.snapshot import save_snapshot
+from arc_helper.arctracker.verdict import VerdictKind
+from arc_helper.config import Settings
+
+FIX = Path(__file__).parent / "fixtures"
+KEY = "FAKEKEY-not-a-real-one"
+T0 = datetime(2026, 11, 7, 12, 0, tzinfo=UTC).timestamp()
+
+
+def _fix(name):
+    return json.loads((FIX / name).read_text(encoding="utf-8"))
+
+
+def _raw():
+    return {
+        "inventory": [_fix("inventory_p1.json"), _fix("inventory_p2.json")],
+        "needs": [_fix("needs_p1.json"), _fix("needs_p2.json")],
+        "tracking": _fix("tracking.json"),
+        "progress_blueprints": _fix("progress_blueprints.json"),
+        "progress_workshop": _fix("progress_workshop.json"),
+    }
+
+
+class Clock:
+    def __init__(self, t=T0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+class FakeClient:
+    """Returns fixture data; `script` is a list of exceptions/None consumed per
+    call (None = success); when exhausted, `default` applies."""
+
+    def __init__(self, script=(), default=None):
+        self.script = list(script)
+        self.default = default
+        self.calls = 0
+
+    def fetch_raw(self):
+        self.calls += 1
+        outcome = self.script.pop(0) if self.script else self.default
+        if outcome is not None:
+            raise outcome
+        return _raw()
+
+
+def _settings(tmp_path, key=KEY):
+    return Settings(
+        _env_file=None,
+        arctracker_api_key=key,
+        rules_path=tmp_path / "rules.yaml",
+        arctracker_cache_dir=tmp_path / "cache",
+    )
+
+
+def _loader(value):
+    return lambda *_a, **_k: value
+
+
+def _write_catalogue_cache(tmp_path):
+    cache = tmp_path / "cache"
+    cache.mkdir(exist_ok=True)
+    shutil.copy(FIX / "catalogue_subset.json", cache / "catalogue.json")
+
+
+def _service(tmp_path, client, clock=None, key=KEY, cat=None):
+    _write_catalogue_cache(tmp_path)
+    return AdvisorService(
+        _settings(tmp_path, key),
+        client=client,
+        clock=clock or Clock(),
+        catalogue_loader=_loader(cat),
+    )
+
+
+def _run(svc, clock, seconds):
+    """Advance the fake clock one loop tick (1 s) at a time."""
+    for _ in range(seconds):
+        svc.step()
+        clock.t += 1
+
+
+def test_lookup_uses_cached_snapshot_offline(tmp_path):
+    synced = datetime(2026, 11, 7, 10, 0, tzinfo=UTC)
+    snap = PlayerSnapshot(
+        synced_at=synced,
+        fetched_at=synced,
+        owned={"canister": 10},
+        needs=(),
+        keep_amounts={},
+        learned_blueprints=frozenset(),
+        blueprints_complete=True,
+        bench_levels={},
+    )
+    save_snapshot(snap, tmp_path / "cache" / "snapshot.json")
+    clock = Clock()
+    svc = _service(tmp_path, FakeClient(default=ArcTrackerError("offline")), clock)
+    # works before the service thread has done anything
+    got = svc.lookup("CANISTER")
+    assert got is not None
+    verdict, age, stale = got
+    assert verdict.title
+    assert age == "⟳ 2h"
+    assert stale is False
+    svc.step()  # refresh fails; cached snapshot stays
+    assert svc.lookup("CANISTER")[1] == "⟳ 2h"
+
+
+def test_keeps_last_snapshot_and_backs_off_on_error(tmp_path):  # Review Focus 3
+    clock = Clock()
+    err = ArcTrackerError("boom")
+    client = FakeClient(script=[None, err, err, err], default=err)
+    svc = _service(tmp_path, client, clock)
+    _run(svc, clock, 600)
+    assert client.calls <= 6
+    assert svc.lookup("CANISTER") is not None
+    assert (tmp_path / "cache" / "snapshot.json").exists()
+
+
+def test_backoff_schedule(tmp_path):
+    clock = Clock()
+    err = ArcTrackerError("boom")
+    client = FakeClient(script=[None], default=err)
+    svc = _service(tmp_path, client, clock)
+    times = []
+    for _ in range(1200):
+        before = client.calls
+        svc.step()
+        if client.calls != before:
+            times.append(clock.t - T0)
+        clock.t += 1
+    # ok at 0; fail at 300; then 60, 120, 300, 300 s apart
+    assert times[:6] == [0, 300, 360, 480, 780, 1080]
+
+
+def test_auth_error_stops_retrying(tmp_path, caplog):
+    clock = Clock()
+    client = FakeClient(default=ArcTrackerAuthError("unauthorized"))
+    svc = _service(tmp_path, client, clock)
+    with caplog.at_level(logging.WARNING):
+        _run(svc, clock, 2000)
+        svc.request_refresh()
+        _run(svc, clock, 100)
+    assert client.calls == 1
+    assert sum("API key" in r.getMessage() for r in caplog.records) == 1
+    assert "key" in svc.status().lower()
+
+
+def test_request_refresh_throttled(tmp_path):
+    clock = Clock()
+    client = FakeClient()
+    svc = _service(tmp_path, client, clock)
+    _run(svc, clock, 100)
+    assert client.calls == 1
+    for _ in range(5):  # 5 requests within 60 s
+        svc.request_refresh()
+        _run(svc, clock, 10)
+    _run(svc, clock, 30)
+    assert client.calls == 2
+
+
+def test_request_refresh_soon_after_fetch_is_ignored(tmp_path):
+    clock = Clock()
+    client = FakeClient()
+    svc = _service(tmp_path, client, clock)
+    _run(svc, clock, 10)
+    svc.request_refresh()  # 10 s after the start-up fetch
+    _run(svc, clock, 100)
+    assert client.calls == 1
+    svc.request_refresh()  # 110 s after it
+    _run(svc, clock, 1)
+    assert client.calls == 2
+
+
+def test_rules_edit_rebuilds_plan(tmp_path):
+    clock = Clock()
+    rules = tmp_path / "rules.yaml"
+    rules.write_text("anvil_i: {action: sell}\n", encoding="utf-8")
+    svc = _service(tmp_path, FakeClient(), clock)
+    _run(svc, clock, 2)
+    assert svc.lookup("Anvil I")[0].kind is VerdictKind.SELL
+    rules.write_text("anvil_i: {action: keep}\n", encoding="utf-8")
+    st = rules.stat()
+    os.utime(rules, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+    _run(svc, clock, 1)
+    assert svc.lookup("Anvil I")[0].kind is VerdictKind.KEEP
+
+
+def test_lookup_is_fast(tmp_path):
+    clock = Clock()
+    svc = _service(tmp_path, FakeClient(), clock)
+    svc.step()
+    names = ["CANISTER", "Light Gun Parts", "RENEGADE IV", "Oil", "Anvil I"]
+    start = time.perf_counter()
+    for i in range(1000):
+        assert svc.lookup(names[i % len(names)]) is not None
+    assert time.perf_counter() - start < 5
+
+
+def test_unknown_name_is_none(tmp_path):
+    svc = _service(tmp_path, FakeClient())
+    svc.step()
+    assert svc.lookup("NOT AN ITEM AT ALL") is None
+
+
+def test_no_snapshot_means_no_lookup(tmp_path):
+    svc = _service(tmp_path, FakeClient(default=ArcTrackerError("x")))
+    svc.step()
+    assert svc.lookup("CANISTER") is None
+
+
+def test_no_key_means_no_lookup(tmp_path, caplog):
+    client = FakeClient()
+    with caplog.at_level(logging.INFO):
+        svc = _service(tmp_path, client, key=None)
+        svc.step()
+    assert svc.lookup("CANISTER") is None
+    assert client.calls == 0
+    msg = "ARC Tracker: no API key; using generic item database"
+    assert [r.getMessage() for r in caplog.records].count(msg) == 1
+
+
+def test_downloaded_catalogue_used_without_cache(tmp_path, cat):
+    svc = AdvisorService(
+        _settings(tmp_path),
+        client=FakeClient(),
+        clock=Clock(),
+        catalogue_loader=_loader(cat),
+    )
+    assert svc.lookup("CANISTER") is None
+    svc.step()
+    assert svc.lookup("CANISTER") is not None
+
+
+def test_key_never_leaks(tmp_path, caplog):
+    clock = Clock()
+    boom = RuntimeError(f"connect failed: Authorization: Bearer {KEY}")
+    client = FakeClient(default=boom)
+    settings = _settings(tmp_path)
+    _write_catalogue_cache(tmp_path)
+    svc = AdvisorService(
+        settings, client=client, clock=clock, catalogue_loader=_loader(None)
+    )
+    with caplog.at_level(logging.DEBUG):
+        _run(svc, clock, 400)
+    assert client.calls >= 2
+    assert KEY not in caplog.text
+    for rec in caplog.records:
+        assert KEY not in rec.getMessage()
+        assert not rec.exc_info or KEY not in str(rec.exc_info[1])
+    for f in (tmp_path / "cache").rglob("*"):
+        if f.is_file():
+            assert KEY not in f.read_text(encoding="utf-8", errors="replace")
+    assert KEY not in repr(svc)
+    assert KEY not in repr(settings)
+    assert KEY not in svc.status()
+
+
+def test_real_client_redacts_key_and_has_safe_repr():
+    from arc_helper.arctracker.mcp_client import ArcTrackerClient
+
+    c = ArcTrackerClient(KEY, "http://127.0.0.1:9/mcp")  # nothing listens on 9
+    assert KEY not in repr(c)
+    with pytest.raises(ArcTrackerError) as info:
+        c.fetch_raw()
+    assert KEY not in str(info.value)
+    assert info.value.__cause__ is None
+
+
+def test_start_stop(tmp_path):
+    client = FakeClient()
+    svc = _service(tmp_path, client)
+    svc.start()
+    deadline = time.monotonic() + 2
+    while client.calls == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    svc.stop()
+    assert client.calls == 1
+    assert svc.lookup("CANISTER") is not None
