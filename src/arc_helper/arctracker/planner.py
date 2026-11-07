@@ -3,7 +3,8 @@
 Priority (lower tier first): 1 ARC Tracker needs, 2 loadout weapons, 3 other
 loadout groups, 4..6 rules.yaml / ARC keep targets. Within a tier, targets keep
 their file order and are served in two passes: every ``min`` first, then every
-``ideal``. A target that is short claims the ingredients to craft the shortfall.
+``ideal``. A target that is short claims the ingredients to craft the shortfall
+(ceil(shortfall / craft yield) crafts; ammo yields several units per craft).
 A loadout weapon W with C copies holds exact W copies first, then lower-tier
 copies (highest tier first); a held lower copy still demands its upgrade cost to
 W, and each missing copy demands the full tier I recipe plus every upgrade.
@@ -13,6 +14,7 @@ is left in ``Plan.unclaimed``.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from dataclasses import field
 from typing import TYPE_CHECKING
@@ -39,9 +41,10 @@ class TargetState:
     min: int
     ideal: int
     tier: int
-    craft_inputs: dict[str, int]  # per-unit cost of the next unit / copy
+    craft_inputs: dict[str, int]  # cost of one craft / of the next copy
     held: int = 0  # units claimed __self__ for this target
     exact: int | None = None  # weapons only: held copies at the target tier
+    craft_quantity: int = 1  # units one craft yields (weapons: 1)
 
     @property
     def state(self) -> Literal["low", "building", "met"]:
@@ -59,6 +62,11 @@ class TargetState:
     def shortfall(self) -> int:
         have = self.exact if self.exact is not None else self.held
         return max(0, self.ideal - have)
+
+    @property
+    def crafts_needed(self) -> int:
+        """Crafts that cover the shortfall: ceil(shortfall / yield)."""
+        return math.ceil(self.shortfall / self.craft_quantity)
 
 
 @dataclass(frozen=True)
@@ -80,8 +88,9 @@ class Plan:
 class _Spec:
     item_id: str
     target: Target
-    recipe: dict[str, int]  # per-unit craft cost (non-weapons)
+    recipe: dict[str, int]  # cost of one craft (non-weapons)
     chain: tuple[str, ...] | None = None  # weapons: tier I .. item_id
+    craft_quantity: int = 1  # units one craft yields (non-weapons)
 
 
 @dataclass
@@ -165,25 +174,31 @@ def _specs(
                     if item_id in catalogue.items
                     else [item_id]
                 )
-            specs[item_id] = _Spec(item_id, target, _recipe(catalogue, item_id), chain)
+            specs[item_id] = _spec(catalogue, item_id, target, chain)
     for item_id, base in rules.targets.items():
         if item_id not in specs:
             target = _raise_to_keep(base, _keep(snapshot, item_id))
-            specs[item_id] = _Spec(item_id, target, _recipe(catalogue, item_id))
+            specs[item_id] = _spec(catalogue, item_id, target)
     if snapshot is not None:
         for item_id, keep in snapshot.keep_amounts.items():
             if item_id not in specs and keep > 0:
-                specs[item_id] = _Spec(
-                    item_id,
-                    Target(keep, keep, DEFAULT_TIER),
-                    _recipe(catalogue, item_id),
+                specs[item_id] = _spec(
+                    catalogue, item_id, Target(keep, keep, DEFAULT_TIER)
                 )
     return specs
 
 
-def _recipe(catalogue: Catalogue, item_id: str) -> dict[str, int]:
+def _spec(
+    catalogue: Catalogue,
+    item_id: str,
+    target: Target,
+    chain: tuple[str, ...] | None = None,
+) -> _Spec:
     item = catalogue.items.get(item_id)
-    return dict(item.recipe) if item is not None else {}
+    if item is None:
+        return _Spec(item_id, target, {}, chain)
+    quantity = 1 if chain is not None else item.craft_quantity
+    return _Spec(item_id, target, dict(item.recipe), chain, quantity)
 
 
 def build_plan(
@@ -246,7 +261,8 @@ def build_plan(
         h = held[s.item_id]
         h.total += claim(s.item_id, SELF, goal - h.total)
         want: dict[str, int] = {}
-        _add(want, s.recipe, max(0, goal - h.total))
+        crafts = math.ceil(max(0, goal - h.total) / s.craft_quantity)
+        _add(want, s.recipe, crafts)
         return want
 
     for tier in sorted({s.target.tier for s in specs.values()}):
@@ -300,6 +316,7 @@ def _state(
             t.tier,
             s.recipe,
             h.total,
+            craft_quantity=s.craft_quantity,
         )
     exact = h.total - sum(h.lower.values())
     # next copy: upgrade the best held lower copy, else craft from scratch

@@ -145,3 +145,8 @@ def test_is_weapon_from_firearm_classification(cat):
     assert cat.items["anvil_i"].is_weapon is True
     assert cat.items["light_gun_parts"].is_weapon is False  # weapons category only
     assert cat.items["light_ammo"].is_weapon is False
+
+
+def test_craft_quantity_parsed(cat):
+    assert cat.items["light_ammo"].craft_quantity == 25
+    assert cat.items["light_gun_parts"].craft_quantity == 1  # no craftQuantity

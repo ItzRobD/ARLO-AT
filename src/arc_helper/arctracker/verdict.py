@@ -196,8 +196,9 @@ def _hint(
         return None, None
     if craft_now > 0:
         have = t.exact if t.exact is not None else t.held
-        state = "covers" if craft_now >= t.shortfall else "partial"
-        return f"Craft {craft_now} now → {have + craft_now} / {t.ideal}", state
+        state = "covers" if craft_now >= t.crafts_needed else "partial"
+        made = have + craft_now * t.craft_quantity
+        return f"Craft {craft_now} now → {made} / {t.ideal}", state
     return f"Farm {_name(plan, scarcest)}", "none"
 
 
@@ -232,12 +233,13 @@ def _made_from(
         return (), None, None
     spare = {k: _spare_for(plan, k, item_id) for k in inputs}
     cap = _upgradable_copies(plan, item_id, t)
-    craft_now = min(t.shortfall, cap, *(spare[k] // q for k, q in inputs.items()))
+    crafts = t.crafts_needed
+    craft_now = min(crafts, cap, *(spare[k] // q for k, q in inputs.items()))
     rows = tuple(
         CraftRow(
             f"{_name(plan, k)} {TIMES}{q}",
             f"own {plan.owned.get(k, 0)} · {spare[k]} spare",
-            _cover_state(spare[k] // q, t.shortfall),
+            _cover_state(spare[k] // q, crafts),
         )
         for k, q in inputs.items()
     )

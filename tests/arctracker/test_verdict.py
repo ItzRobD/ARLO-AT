@@ -723,3 +723,29 @@ def test_weapon_craft_now_capped_by_lower_copies(plan):
     )
     v = verdict_for(p, "renegade_iv")  # shortfall 2, one copy to upgrade
     assert (v.hint, v.hint_state) == ("Craft 1 now → 1 / 2", "partial")
+
+
+AMMO = "light_ammo: {target: 60}"
+
+
+def test_craft_yield_hint_and_pips(plan):
+    # shortfall 50 at 25 per craft -> 2 crafts; metal covers only 1
+    p = plan(
+        owned={"light_ammo": 10, "chemicals": 10, "metal_parts": 3},
+        rules=AMMO,
+        benches={"workbench": 1},
+    )
+    v = verdict_for(p, "light_ammo")
+    assert [(r.label, r.state) for r in v.made_from] == [
+        ("Chemicals ×2", "covers"),  # 10 // 2 = 5 >= 2 crafts
+        ("Metal Parts ×3", "partial"),  # 3 // 3 = 1 < 2 crafts
+    ]
+    assert (v.hint, v.hint_state) == ("Craft 1 now → 35 / 60", "partial")
+    p = plan(
+        owned={"light_ammo": 10, "chemicals": 10, "metal_parts": 6},
+        rules=AMMO,
+        benches={"workbench": 1},
+    )
+    v = verdict_for(p, "light_ammo")
+    assert all(r.state == "covers" for r in v.made_from)
+    assert (v.hint, v.hint_state) == ("Craft 2 now → 60 / 60", "covers")

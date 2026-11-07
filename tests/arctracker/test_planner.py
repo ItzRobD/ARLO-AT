@@ -454,3 +454,13 @@ def test_negative_owned_counts_are_treated_as_zero(plan, rules):
     p = plan(snap(owned={"oil": -3}), rules("oil: {target: 5}"))
     assert p.unclaimed["oil"] == 0
     assert p.targets["oil"].owned == 0
+
+
+def test_craft_yield_divides_demand(plan, rules):
+    # light ammo: 25 rounds per craft of 2 chemicals + 3 metal parts
+    p = plan(snap({"light_ammo": 10}), rules("light_ammo: {target: 60}"))
+    # shortfall 50 -> ceil(50 / 25) = 2 crafts
+    assert p.demand["chemicals"] == {"light_ammo": 4}
+    assert p.demand["metal_parts"] == {"light_ammo": 6}
+    p = plan(snap({"light_ammo": 59}), rules("light_ammo: {target: 60}"))
+    assert p.demand["chemicals"] == {"light_ammo": 2}  # 1 short -> 1 craft

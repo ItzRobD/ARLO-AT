@@ -46,6 +46,7 @@ class CatalogueItem:
     upgrades_to: str | None
     blueprint_locked: bool
     is_weapon: bool = False  # classification Firearm.*
+    craft_quantity: int = 1  # units one craft yields (ammo: 5..25)
 
 
 def _classification(raw: dict[str, Any]) -> str:
@@ -110,6 +111,7 @@ def _parse_item(raw: dict[str, Any]) -> CatalogueItem:
         upgrades_to=raw.get("upgradesTo"),
         blueprint_locked=bool(raw.get("blueprintLocked")),
         is_weapon=_classification(raw).startswith("Firearm."),
+        craft_quantity=max(1, int(raw.get("craftQuantity") or 1)),
     )
 
 
