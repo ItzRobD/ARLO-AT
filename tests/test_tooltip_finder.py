@@ -69,3 +69,15 @@ def test_full_width_grey_box_does_not_split_tooltip():
     left, top, right, bottom = find_tooltip(frame)
     assert abs(top - 424) <= 4
     assert abs(bottom - 1116) <= 4
+
+
+def test_cream_outside_tooltip_columns_does_not_move_top():
+    # Regression: pale "100/100" durability text beside the tooltip, just
+    # above its top, used to lift those rows over ROW_FRAC. ARLO's own popup
+    # covering/uncovering that text flipped the top 476<->492 every frame.
+    clean = _tooltip(_frame(), 1212, 492, 1716, 1000)
+    noisy = clean.copy()
+    noisy[468:484, 1740:1880] = CREAM
+    noisy[468:484, 1960:2100] = CREAM
+    assert find_tooltip(noisy) == find_tooltip(clean)
+    assert abs(find_tooltip(noisy)[1] - 492) <= 4

@@ -73,6 +73,16 @@ def find_tooltip(
     if cols is None or cols[1] - cols[0] < min_px:
         return None
 
+    # Re-derive the vertical run from the tooltip's own columns only: cream
+    # pixels elsewhere on screen (pale "100/100" durability text, or ARLO's
+    # own popup fading in beside the tooltip) can lift a row just above the
+    # panel over ROW_FRAC, flipping the top edge between frames and making
+    # the popup jitter as it chases it.
+    in_cols = mask[:, cols[0] : cols[1]].sum(axis=1)
+    col_rows = _longest_run(in_cols >= in_cols.max() * ROW_FRAC, max_gap)
+    if col_rows is not None and col_rows[1] - col_rows[0] >= min_px:
+        rows = col_rows
+
     # The run above can stop early at grey description boxes or stat rows
     # that span nearly the full width. The tooltip's left and right padding
     # stays cream through all of those, so re-derive the vertical extent
