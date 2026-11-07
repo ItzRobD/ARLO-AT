@@ -70,6 +70,8 @@ The overlay popup displays:
 2. Extract the zip to a folder of your choice
 3. Run `ARLO.exe`
 
+> **This fork:** the upstream release doesn't include this fork's ARC Tracker verdicts or its Linux support. Run from source (Option 2), or build your own `ARLO.exe` on Windows with [docs/BUILD.md](docs/BUILD.md).
+
 The release includes all dependencies, including Tesseract OCR. The item database updates automatically on launch, no more than once per 24 hours.
 
 ### Option 2: From Source
@@ -77,8 +79,8 @@ The release includes all dependencies, including Tesseract OCR. The item databas
 1. Clone the repository:
 
 ```
-git clone https://github.com/Soygen/ARLO.git
-cd ARLO
+git clone https://github.com/ItzRobD/ARLO-AT.git
+cd ARLO-AT
 ```
 
 2. Install dependencies:
@@ -98,6 +100,8 @@ uv sync --all-extras
 ```
 copy .env.example .env
 ```
+
+   To get personal verdicts, put your ARC Tracker key in `.env` (see [Personal Verdicts](#personal-verdicts-arc-tracker-optional)).
 
 5. Launch the app:
 
