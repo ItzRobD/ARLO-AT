@@ -18,3 +18,4 @@ dist
 .screencast_restore_token
 diag_frame.png
 .superpowers/
+cache/

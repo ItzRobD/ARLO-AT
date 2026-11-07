@@ -269,6 +269,14 @@ class Settings(BaseSettings):
         default="KEY_RIGHTCTRL", description="evdev key name for hold-to-scan"
     )
 
+    # ARC Tracker integration
+    arctracker_api_key: str | None = Field(
+        default=None, description="ARC Tracker developer access key"
+    )
+    arctracker_mcp_url: str = Field(default="https://mcp.arctracker.io/mcp")
+    rules_path: Path = Field(default_factory=lambda: APP_DIR / "rules.yaml")
+    arctracker_cache_dir: Path = Field(default_factory=lambda: APP_DIR / "cache")
+
     # Debug settings
     debug_mode: bool = Field(default=False, description="Enable debug mode")
     debug_output_dir: Path = Field(default_factory=lambda: APP_DIR / "debug")
