@@ -319,6 +319,7 @@ class Scanner:
 
         # Personal verdict first; the generic database is the fallback
         if self._show_verdict(item_name, ocr.last_tooltip_bbox):
+            self.stats.items_found_in_db += 1  # a resolved item counts as found
             logger.debug(f"Verdict: {item_name}")
             self._last_shown_item = item_name
             self._last_shown_time = current_time

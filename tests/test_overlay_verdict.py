@@ -132,13 +132,74 @@ def test_swaps_content_in_one_window(root):
 
 def test_unchanged_verdict_is_not_rebuilt(root):
     ov = OverlayWindow(root)
+    builds = []
+    real_build = ov._build_rows
+    ov._build_rows = lambda *a: builds.append(1) or real_build(*a)
     v = _low_ingredient()
     ov.show_verdict("SIMPLEGUNPARTS", v, "⟳ 12m", False, None)
+    root.update()  # map the window so the "already showing" path applies
+    assert ov.is_visible()
     first_row = ov.craft_rows[0].frame
+    assert len(builds) == 2  # crafts + made-from
+
     ov.show_verdict("SIMPLEGUNPARTS", v, "⟳ 12m", False, None)
-    assert ov.craft_rows[0].frame is first_row  # same widgets
+    assert len(builds) == 2  # identical key: nothing rebuilt
+    assert ov.craft_rows[0].frame is first_row
+
     ov.show_verdict("SIMPLEGUNPARTS", v, "⟳ 13m", False, None)
     assert ov.age_label.cget("text") == "⟳ 13m"
+    assert len(builds) == 2  # age-only change keeps the rows
+    assert ov.craft_rows[0].frame is first_row
+
+    other = Verdict(VerdictKind.SELL, "Sell 18", "Surplus", "Own 118", "base")
+    ov.show_verdict("SIMPLEGUNPARTS", other, "⟳ 13m", False, None)
+    assert len(builds) == 4  # a different verdict rebuilds
+
+
+@pytest.fixture
+def unit_scale(monkeypatch):
+    """Scale 1 regardless of the user's OVERLAY_SCALE / DPI."""
+    monkeypatch.setattr(overlay_mod, "get_dpi_scale", lambda: 1.0)
+    settings = overlay_mod.get_settings()
+    monkeypatch.setattr(settings.overlay, "scale", 1.0)
+
+
+@pytest.mark.usefixtures("unit_scale")
+@pytest.mark.parametrize("title", ["Keep · building", "Recycle 120", "Keep all"])
+def test_popup_has_fixed_width(root, title):
+    ov = OverlayWindow(root)
+    assert ov._scale(260) == 260
+    v = Verdict(
+        VerdictKind.KEEP_BUILDING,
+        title,
+        "Reserve target",
+        "Own 21 · min 15 · ideal 50",
+        "weapons",
+        crafts=(CraftRow("Heavy Gun Parts ×35", "140", "low"),),
+    )
+    ov.show_verdict("X", v, "⟳ 12m", False, None)
+    ov.window.update_idletasks()
+    assert ov.window.winfo_reqwidth() == 260
+
+
+@pytest.mark.usefixtures("unit_scale")
+def test_long_text_never_widens_popup(root):
+    ov = OverlayWindow(root)
+    long = "Keep 30 · craft 12 · and a great deal more text than fits"
+    v = Verdict(
+        VerdictKind.KEEP_BUILDING,
+        long,
+        long,
+        long,
+        "crafting",
+        crafts=(CraftRow(long, "own 40 · 24 spare", "partial"),),
+        made_from=(CraftRow(long, long, "none"),),
+        hint=long,
+        hint_state="none",
+    )
+    ov.show_verdict("X", v, "⟳ 10h", True, None)
+    ov.window.update_idletasks()
+    assert ov.window.winfo_reqwidth() == 260
 
 
 def test_hide_then_reshow(root):
@@ -276,6 +337,38 @@ def test_frame_mode_reshow_reuses_verdict(monkeypatch):
     assert msgs[0] == msgs[1]
     assert sc.stats.items_detected == 1  # second scan is a re-show
     assert db.lookups == 0
+
+
+def test_inventory_trigger_requests_refresh_once(monkeypatch):
+    adv = FakeAdvisor(None)
+    sc = _scanner(monkeypatch, adv, FakeDb())
+    reads = []
+
+    def read_name():
+        reads.append(1)
+        if len(reads) >= 5:
+            sc._running = False
+
+    ocr = main_mod.get_ocr_engine()
+    ocr.check_trigger_any = lambda _regions: True  # inventory stays open
+    ocr.read_hovered_item_name = read_name
+    ocr.last_tooltip_bbox = None
+    sc.hotkey = SimpleNamespace(is_held=lambda: False)
+    monkeypatch.setattr(main_mod.time, "sleep", lambda _s: None)
+    sc._running = True
+    sc._scan_loop()
+    assert sc.state == main_mod.ScannerState.ACTIVE
+    assert len(reads) == 5  # several ACTIVE scans...
+    assert adv.refreshes == 1  # ...but one refresh, on the transition
+
+
+def test_verdict_counts_as_found(monkeypatch):
+    adv = FakeAdvisor((_low_ingredient(), "⟳ 12m", False))
+    sc = _scanner(monkeypatch, adv, FakeDb())
+    sc._handle_detected_item("SIMPLEGUNPARTS")
+    sc._handle_detected_item("SIMPLEGUNPARTS")  # frame-mode re-show
+    assert sc.stats.items_detected == 1
+    assert sc.stats.items_found_in_db == 1
 
 
 def test_frame_mode_reshow_fallback_no_relog(monkeypatch):

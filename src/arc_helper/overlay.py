@@ -265,15 +265,34 @@ class OverlayWindow:
         )
         # Only packed when there's detail text (see show())
 
-        self._setup_verdict_ui(action_size, info_size, detail_size)
+        self._setup_verdict_ui(border_w)
 
-    def _setup_verdict_ui(
-        self, action_size: int, info_size: int, detail_size: int
-    ) -> None:
-        """Build the personal-verdict layout (approved mockup v5)."""
-        fam = self.font_family
-        self._row_font = (fam, detail_size)
+    def _px_font(self, size: float, *style: str) -> tuple:
+        """Font sized in pixels (negative Tk size), as in the mockup."""
+        return (self.font_family, -max(7, self._scale(size)), *style)
+
+    @staticmethod
+    def _fit(label: tk.Label, width: int) -> None:
+        """Wrap ``label`` so its requested width (text plus its own padding,
+        border and highlight) is at most ``width``."""
+        chrome = 2 * sum(
+            int(label.cget(o)) for o in ("padx", "borderwidth", "highlightthickness")
+        )
+        label.config(wraplength=max(1, width - chrome))
+
+    def _setup_verdict_ui(self, border_w: int) -> None:
+        """Build the personal-verdict layout (approved mockup v5).
+
+        Fixed width ``_scale(VERDICT_WIDTH)`` including the border; every
+        text label wraps inside it so no verdict can widen the popup.
+        """
+        pad = self._scale(12)
+        self._verdict_width = self._scale(VERDICT_WIDTH)
+        self._verdict_wrap = self._verdict_width - 2 * pad - 2 * border_w
+        self._row_font = self._px_font(12)
         self._pip_size = (max(2, self._scale(4)), max(6, self._scale(12)))
+        self._pip_gap = self._scale(6)
+        self._row_gap = self._scale(8)  # between row label and right text
         self._row_pady = (self._scale(2), 0)
 
         self.verdict_frame = tk.Frame(self.frame, bg=BG_PANEL)
@@ -281,22 +300,21 @@ class OverlayWindow:
         self.verdict_bar = tk.Frame(vf, bg="#888888", height=max(2, self._scale(5)))
         self.verdict_bar.pack(fill="x")
 
-        inner = tk.Frame(vf, bg=BG_PANEL, padx=self._scale(12))
+        inner = tk.Frame(vf, bg=BG_PANEL, padx=pad)
         inner.pack(fill="x", pady=(self._scale(7), self._scale(9)))
         # Fixes the popup width; text rows wrap inside it.
-        self._verdict_wrap = self._scale(VERDICT_WIDTH - 24)
         tk.Frame(inner, bg=BG_PANEL, width=self._verdict_wrap, height=1).pack()
 
         top = tk.Frame(inner, bg=BG_PANEL)
         top.pack(fill="x")
         self.age_label = tk.Label(
-            top, text="", font=(fam, info_size), fg=TEXT_LABEL, bg=BG_PANEL
+            top, text="", font=self._px_font(10.5), fg=TEXT_LABEL, bg=BG_PANEL
         )
         self.age_label.pack(side="right", anchor="n")
         self.title_label = tk.Label(
             top,
             text="",
-            font=(fam, action_size, "bold"),
+            font=self._px_font(19, "bold"),
             fg="#888888",
             bg=BG_PANEL,
             anchor="w",
@@ -307,24 +325,24 @@ class OverlayWindow:
         self.reason_label = tk.Label(
             inner,
             text="",
-            font=(fam, info_size, "bold"),
+            font=self._px_font(12.5, "bold"),
             fg=TEXT_DIM,
             bg=BG_PANEL,
             anchor="w",
             justify=tk.LEFT,
-            wraplength=self._verdict_wrap,
         )
+        self._fit(self.reason_label, self._verdict_wrap)
         self.reason_label.pack(anchor="w", pady=(self._scale(2), 0))
         self.counts_label = tk.Label(
             inner,
             text="",
-            font=(fam, info_size),
+            font=self._px_font(12),
             fg=TEXT_COUNTS,
             bg=BG_PANEL,
             anchor="w",
             justify=tk.LEFT,
-            wraplength=self._verdict_wrap,
         )
+        self._fit(self.counts_label, self._verdict_wrap)
         self.counts_label.pack(anchor="w", pady=(self._scale(3), 0))
 
         # Optional sections; packed only when the verdict has rows
@@ -340,7 +358,7 @@ class OverlayWindow:
         self.made_from_label = tk.Label(
             self.made_from_frame,
             text="MADE FROM",
-            font=(fam, max(7, self._scale(10))),
+            font=self._px_font(10),
             fg=TEXT_LABEL,
             bg=BG_PANEL,
             anchor="w",
@@ -351,13 +369,14 @@ class OverlayWindow:
         self.hint_label = tk.Label(
             self.made_from_frame,
             text="",
-            font=(fam, detail_size),
+            font=self._px_font(11.5),
             fg=TEXT_DIM,
             bg=BG_PANEL,
             anchor="w",
             justify=tk.LEFT,
-            wraplength=self._verdict_wrap,
         )
+
+        self._fit(self.hint_label, self._verdict_wrap)
 
         self.craft_rows: list[_RowWidgets] = []
         self.made_from_rows: list[_RowWidgets] = []
@@ -383,11 +402,25 @@ class OverlayWindow:
                 width=pip_w,
                 height=pip_h,
             )
-            pip.pack(side="left", padx=(0, self._scale(6)))
+            pip.pack(side="left", padx=(0, self._pip_gap))
             right = tk.Label(
-                frame, text=row.right, font=self._row_font, fg=TEXT_DIM, bg=BG_PANEL
+                frame,
+                text=row.right,
+                font=self._row_font,
+                fg=TEXT_DIM,
+                bg=BG_PANEL,
+                justify=tk.RIGHT,
             )
-            right.pack(side="right")
+            self._fit(right, self._verdict_wrap // 2)
+            right.pack(side="right", padx=(self._row_gap, 0))
+            # Label gets what the pip and right text leave of the width
+            label_wrap = (
+                self._verdict_wrap
+                - pip_w
+                - self._pip_gap
+                - self._row_gap
+                - right.winfo_reqwidth()
+            )
             label = tk.Label(
                 frame,
                 text=row.label,
@@ -395,7 +428,9 @@ class OverlayWindow:
                 fg=TEXT_ROW,
                 bg=BG_PANEL,
                 anchor="w",
+                justify=tk.LEFT,
             )
+            self._fit(label, label_wrap)
             label.pack(side="left")
             built.append(_RowWidgets(frame, pip, label, right))
         return built
@@ -458,6 +493,11 @@ class OverlayWindow:
         self._use_content("verdict")
 
         self.age_label.config(text=age, fg=TEXT_STALE if stale else TEXT_LABEL)
+        # Title wraps in what the age leaves, so it never widens the popup
+        self._fit(
+            self.title_label,
+            self._verdict_wrap - self.age_label.winfo_reqwidth() - self._row_gap,
+        )
         if not same_verdict:  # only the age changed: keep the widgets
             color = VERDICT_COLORS.get(verdict.kind, "#888888")
             self.verdict_bar.config(bg=color)
