@@ -118,6 +118,7 @@ def test_need_kind_labels(plan):
         "project": "Project",
         "goal": "Craft goal",
         "stock": "Keep amount",
+        "keep_amount": "Keep amount",
         "research": "Research",
         "upgrade": "Upgrade",
         "build": "Build",
@@ -125,6 +126,11 @@ def test_need_kind_labels(plan):
     for kind, word in cases.items():
         v = verdict_for(plan(needs=[("oil", 2, kind, "X")]), "oil")
         assert v.reason == f"{word} · X ×2", kind
+
+
+def test_unknown_need_kind_is_humanised(plan):
+    v = verdict_for(plan(needs=[("oil", 2, "loadout_reserve", "X")]), "oil")
+    assert v.reason == "Loadout reserve · X ×2"
 
 
 def test_need_reason_highest_priority_kind_first(plan):

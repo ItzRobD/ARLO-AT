@@ -39,6 +39,7 @@ NEED_KINDS = {
     "project": "Project",
     "goal": "Craft goal",
     "stock": "Keep amount",
+    "keep_amount": "Keep amount",
     "research": "Research",
     "upgrade": "Upgrade",
     "build": "Build",
@@ -127,7 +128,7 @@ def _top_need(plan: Plan, item_id: str) -> Need | None:
 
 
 def _need_reason(need: Need) -> str:
-    kind = NEED_KINDS.get(need.kind.lower(), need.kind.capitalize())
+    kind = NEED_KINDS.get(need.kind.lower(), need.kind.replace("_", " ").capitalize())
     return f"{kind} · {need.label} {TIMES}{need.needed}"
 
 
