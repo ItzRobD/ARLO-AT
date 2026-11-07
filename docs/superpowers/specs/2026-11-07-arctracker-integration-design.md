@@ -50,6 +50,13 @@ personal by combining that data with the owner's own rules.
 - Credits, wallet or financial tracking (excluded by the ruleset).
 - Multi-level crafting chains in the popup (only one level each way).
 - Outpost weapon racks or other storage ARC Tracker doesn't report.
+- Counting what is carried in a raid (backpack). v1 shows stash counts
+  only. **Follow-up work item, separate branch:** identify backpack slots
+  by matching ARC Tracker's published icons
+  (`https://cdn.arctracker.io/items/v2/<id>.png`, 256×256) plus OCR of
+  the slot's stack count — start with a throwaway accuracy spike on one
+  in-raid backpack screenshot. Prior art: ARC Tracker's own (closed,
+  Windows) overlay needed a trained vision model for this.
 
 ## Anti-goals (a failure even if it "works")
 
@@ -208,13 +215,12 @@ level is met (via MCP `get_my_progress`); otherwise the hint reads e.g.
 `Needs Refiner 2` or `Blueprint not learned`. If progress data is missing,
 show no craft-now hint.
 
-**In-raid context** (owner decision): the in-raid INVENTORY trigger
-(trigger region 2) marks raid mode. The verdict answers "is this worth
-bringing home?" using stash counts. The counts line adds what the last
-sync saw in the backpack: `Own 21 · +3 carried`. Items picked up during
-the raid are not known (ARC Tracker reads the loadout from the game, normally
-before the raid); the owner accounts for those mentally. Sell/Recycle N
-in raid refers to the stash surplus.
+**In-raid context** (owner decision): v1 uses only solid data — the synced
+stash and the rules. In a raid the popup behaves exactly as in the stash
+(same verdict, same stash counts), answering "do I need this?"; the owner
+adds what they are carrying in their head. No backpack counting: neither
+the last-synced loadout (normally read before the raid) nor counts learned
+from hovering (wrong as soon as an item is dropped) are used.
 
 ### Popup content (approved mockup v5, with the change below)
 
