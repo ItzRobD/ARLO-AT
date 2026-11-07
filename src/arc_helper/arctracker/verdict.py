@@ -150,12 +150,19 @@ def _weapon_for_lower(plan: Plan, item_id: str) -> str | None:
     return None
 
 
+def _unmet_demand(plan: Plan, item_id: str) -> dict[str, int]:
+    """Demand for this ingredient from targets that are not met."""
+    return {
+        tid: units
+        for tid, units in plan.demand.get(item_id, {}).items()
+        if tid in plan.targets and plan.targets[tid].state != "met"
+    }
+
+
 def _crafts(plan: Plan, item_id: str) -> tuple[CraftRow, ...]:
     rows: list[tuple[int, int, CraftRow]] = []
-    for tid, units in plan.demand.get(item_id, {}).items():
-        t = plan.targets.get(tid)
-        if t is None or t.state == "met":
-            continue
+    for tid, units in _unmet_demand(plan, item_id).items():
+        t = plan.targets[tid]
         row = CraftRow(f"{_name(plan, tid)} {TIMES}{t.shortfall}", str(units), t.state)
         rows.append((0 if t.state == "low" else 1, -units, row))
     rows.sort(key=itemgetter(0, 1))  # stable: demand order on ties
@@ -194,6 +201,25 @@ def _hint(
     return f"Farm {_name(plan, scarcest)}", "none"
 
 
+def _cover_state(crafts: int, shortfall: int) -> str:
+    if crafts >= shortfall:
+        return "covers"
+    return "partial" if crafts > 0 else "none"
+
+
+def _upgradable_copies(plan: Plan, item_id: str, t: TargetState) -> int:
+    """For a weapon whose next copy is an upgrade, the held copies at the best
+    lower tier (craft_inputs is that tier's upgrade cost); else no cap."""
+    if t.exact is None or t.held <= t.exact or item_id not in plan.catalogue.items:
+        return t.shortfall
+    chain = plan.catalogue.weapon_chain(item_id)[:-1]
+    for lower in reversed(chain):
+        copies = plan.claims.get(lower, {}).get(SELF, 0)
+        if copies > 0:
+            return copies
+    return t.shortfall
+
+
 def _made_from(
     plan: Plan, item_id: str
 ) -> tuple[tuple[CraftRow, ...], str | None, str | None]:
@@ -205,18 +231,13 @@ def _made_from(
     if not inputs:
         return (), None, None
     spare = {k: _spare_for(plan, k, item_id) for k in inputs}
-    craft_now = min(t.shortfall, *(spare[k] // q for k, q in inputs.items()))
-    if craft_now >= t.shortfall:
-        row_state = "covers"
-    elif craft_now > 0:
-        row_state = "partial"
-    else:
-        row_state = "none"
+    cap = _upgradable_copies(plan, item_id, t)
+    craft_now = min(t.shortfall, cap, *(spare[k] // q for k, q in inputs.items()))
     rows = tuple(
         CraftRow(
             f"{_name(plan, k)} {TIMES}{q}",
             f"own {plan.owned.get(k, 0)} · {spare[k]} spare",
-            row_state,
+            _cover_state(spare[k] // q, t.shortfall),
         )
         for k, q in inputs.items()
     )
@@ -277,8 +298,9 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
             f"Own {owned} · need {need_total}",
         )
 
-    # 2. Loadout item, and lower-tier copies held for a loadout weapon.
-    if t is not None and _is_loadout(t) and owned <= t.ideal:
+    # 2. Loadout item (copies > 0), and lower-tier copies of a loadout weapon.
+    ruled = t is not None and t.ideal > 0  # a copies: 0 loadout is no target
+    if ruled and t is not None and _is_loadout(t) and owned <= t.ideal:
         k, title = _STATE_KIND[t.state]
         return (
             k,
@@ -286,9 +308,10 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
             f"Loadout · {_copies(t.ideal)}",
             f"Own {owned} · keep {t.ideal}",
         )
-    if t is None and claims.get(SELF, 0) > 0 and spare == 0:
-        weapon = _weapon_for_lower(plan, item_id)
-        if weapon is not None:
+    weapon = _weapon_for_lower(plan, item_id) if t is None else None
+    if weapon is not None and spare == 0:
+        held = claims.get(SELF, 0) > 0
+        if held or (owned == 0 and plan.targets[weapon].state != "met"):
             return (
                 VerdictKind.KEEP_BUILDING,
                 "Keep · building",
@@ -301,18 +324,22 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
         k, title = _STATE_KIND[t.state]
         return k, title, note or "Reserve target", _target_counts(owned, t)
 
-    # 4. Ingredient claimed for short targets.
-    ingredient = {w: u for w, u in claims.items() if w not in {NEED, SELF}}
-    if sum(ingredient.values()) > 0:
-        low = any(
-            plan.targets[w].state == "low" for w in ingredient if w in plan.targets
-        )
+    # 4. Ingredient of unmet targets (also when none is owned).
+    unmet = _unmet_demand(plan, item_id)
+    if unmet:
+        low = any(plan.targets[w].state == "low" for w in unmet)
         claimed = sum(claims.values())
+        if owned == 0:
+            title = "Keep"
+        elif claimed >= owned:
+            title = "Keep all"
+        else:
+            title = f"Keep {claimed}"
         return (
             VerdictKind.KEEP_LOW if low else VerdictKind.KEEP_BUILDING,
-            "Keep all" if claimed >= owned else f"Keep {claimed}",
+            title,
             "Crafting ingredient",
-            f"Own {owned} · crafts need {sum(plan.demand.get(item_id, {}).values())}",
+            f"Own {owned} · crafts need {sum(unmet.values())}",
         )
 
     # 5. Policy rules and keys.
@@ -321,22 +348,22 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
     if item.type == "Key":
         if item.rarity in rules.keep_key_rarities:
             return VerdictKind.KEEP, "Keep", f"Key · {item.rarity}", f"Own {owned}"
-        title = f"Sell {spare}" if spare > 0 else "Sell"
-        return VerdictKind.SELL, title, "Key · use or sell", f"Own {owned}"
+        if spare > 0 or owned == 0:
+            title = f"Sell {spare}" if spare > 0 else "Sell"
+            return VerdictKind.SELL, title, "Key · use or sell", f"Own {owned}"
 
-    # 6. Surplus.
+    # 6. Classes ARC Tracker never computes surplus for: never Sell by default.
+    no_rule_class = item.type in NO_RULE_TYPES or item.is_weapon
+    if no_rule_class and action is None and not ruled and (spare > 0 or owned == 0):
+        return (
+            VerdictKind.NO_RULE,
+            "No rule",
+            "No rule for this item",
+            f"Own {owned} · {value}",
+        )
+
+    # 7. Surplus.
     if spare > 0:
-        if (
-            action is None
-            and t is None
-            and (item.type in NO_RULE_TYPES or item.is_weapon)
-        ):
-            return (
-                VerdictKind.NO_RULE,
-                "No rule",
-                "No rule for this item",
-                f"Own {owned} · {value}",
-            )
         if action == "recycle":
             recycle = True
         elif action == "sell":
@@ -345,13 +372,13 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
             recycle = (
                 bool(item.recycles_into) and _recycle_value(plan, item) > item.value
             )
-        if t is not None:
+        if ruled:
             why = "Above reserve"
         elif action is not None:
             why = f"Rule · {action.replace('_', ' ')}"
         else:
             why = "Surplus"
-        if t is not None:
+        if ruled and t is not None:
             counts = f"Own {owned} · ideal {t.ideal} · {value}"
         elif recycle and item.recycles_into:
             outputs = ", ".join(
@@ -364,18 +391,17 @@ def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str
             return VerdictKind.RECYCLE, f"Recycle {spare}", why, counts
         return VerdictKind.SELL, f"Sell {spare}", why, counts
 
-    if owned == 0:
+    if owned == 0:  # nothing protects it and nothing is owned
         return VerdictKind.SELL, "Sell", "Surplus", f"Own 0 · {value}"
 
-    # 7. Everything claimed: the top claimant's reason.
+    # 8. Everything claimed: the top claimant's reason.
     if claims.get(NEED, 0) > 0 and need is not None:
         why = _need_reason(need)
-    elif t is not None and _is_loadout(t):
+    elif ruled and t is not None and _is_loadout(t):
         why = f"Loadout · {_copies(t.ideal)}"
     elif t is not None:
         why = note or "Reserve target"
     else:
-        weapon = _weapon_for_lower(plan, item_id)
         why = (
             f"Loadout · upgrade to {_name(plan, weapon)}"
             if weapon is not None

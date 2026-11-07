@@ -603,12 +603,18 @@ def test_weapon_made_from_uses_upgrade_cost(plan):
     assert v.hint_state == "covers"
 
 
-def test_every_catalogue_item_gets_a_verdict(plan, cat):
+@pytest.mark.parametrize("scale", [0, 1, 3, 20])
+def test_every_catalogue_item_gets_a_safe_verdict(plan, cat, scale):
     p = plan(
-        owned={i: n % 7 for n, i in enumerate(cat.items)},
-        needs=[("oil", 2, "quest", "Q"), ("arc_alloy", 9, "project", "P")],
+        owned={i: (n % 7) * scale for n, i in enumerate(cat.items)},
+        needs=[
+            ("oil", 200, "quest", "Q"),
+            ("arc_alloy", 200, "project", "P"),
+            ("bombardier_cell", 1, "quest", "Q2"),
+        ],
         rules=GUN_PARTS
         + "\nmedium_shield: {action: keep}"
+        + "\nmechanical_components: {min: 4, ideal: 9}"
         + "\nloadout: {weapons: {items: [renegade_iv, anvil_i], copies: 2},"
         " shields: {items: [medium_shield], copies: 0}}"
         + "\nkeys: {keep_rarities: [Epic]}",
@@ -616,7 +622,104 @@ def test_every_catalogue_item_gets_a_verdict(plan, cat):
         learned={"light_gun_parts"},
         benches={"refiner": 2},
     )
-    for item_id in cat.items:
+    for item_id in [*cat.items, "not_in_catalogue"]:
         v = verdict_for(p, item_id)
         assert v.title, item_id
         assert isinstance(v.kind, VerdictKind), item_id
+        if v.kind not in {K.SELL, K.RECYCLE}:
+            continue
+        # never sell or recycle a unit someone else holds
+        n = v.title.split(" ", 1)[1] if " " in v.title else "0"
+        assert int(n) <= p.unclaimed.get(item_id, 0), item_id
+        unmet = [w for w in p.demand.get(item_id, {}) if p.targets[w].state != "met"]
+        assert not unmet, item_id
+        t = p.targets.get(item_id)
+        assert t is None or t.state == "met", item_id
+        if p.need_claims.get(item_id, 0) > 0:  # only the surplus above needs
+            assert p.owned[item_id] > p.need_totals[item_id], item_id
+
+
+def test_sweep_needs_owned_within_total_are_never_sold(plan, cat):
+    owned = dict.fromkeys(cat.items, 3)
+    p = plan(owned=owned, needs=[(i, 5, "quest", "Q") for i in cat.items])
+    for item_id in cat.items:
+        assert verdict_for(p, item_id).kind is K.KEEP, item_id
+
+
+# --- Fix round 1 -----------------------------------------------------------
+
+
+def test_zero_owned_ingredient_of_short_target(plan):
+    v = verdict_for(plan(owned={}, rules=LIGHT), "simple_gun_parts")
+    # light 0/15/50: short 50 -> 200 simple parts
+    assert (v.kind, v.title, v.reason, v.counts) == (
+        K.KEEP_LOW,
+        "Keep",
+        "Crafting ingredient",
+        "Own 0 · crafts need 200",
+    )
+    assert v.crafts == (CraftRow("Light Gun Parts ×50", "200", "low"),)
+
+
+def test_zero_owned_blueprint_is_no_rule(plan):
+    v = verdict_for(plan(), "advanced_camera_blueprint")
+    assert (v.kind, v.title, v.counts) == (K.NO_RULE, "No rule", "Own 0 · 5,000₡ ea")
+
+
+def test_zero_owned_lower_tier_weapon(plan):
+    p = plan(rules="loadout: {weapons: {items: [renegade_iv], copies: 2}}")
+    v = verdict_for(p, "renegade_iii")
+    assert (v.kind, v.title, v.reason, v.counts) == (
+        K.KEEP_BUILDING,
+        "Keep · building",
+        "Loadout · upgrade to Renegade IV",
+        "Own 0",
+    )
+
+
+def test_extra_lower_tier_copy_is_no_rule(plan):
+    p = plan(
+        owned={"renegade_iii": 2},
+        rules="loadout: {weapons: {items: [renegade_iv], copies: 1}}",
+    )
+    assert verdict_for(p, "renegade_iii").kind is K.NO_RULE
+
+
+def test_copies_zero_loadout_is_not_a_keep(plan):
+    rules = "loadout: {shields: {items: [medium_shield], copies: 0}}"
+    v = verdict_for(plan(rules=rules), "medium_shield")
+    assert (v.kind, v.reason) == (K.NO_RULE, "No rule for this item")
+    v = verdict_for(plan(owned={"medium_shield": 2}, rules=rules), "medium_shield")
+    assert v.kind is K.NO_RULE
+    rules = "loadout: {heals: {items: [herbal_bandage], copies: 0}}"
+    v = verdict_for(plan(rules=rules), "herbal_bandage")
+    assert (v.kind, v.title, v.reason) == (K.SELL, "Sell", "Surplus")
+
+
+def test_made_from_pip_per_ingredient(plan):
+    # mechanical components: 7 metal + 3 rubber; target 5 -> shortfall 5
+    p = plan(
+        owned={"metal_parts": 70, "rubber_parts": 6},
+        rules="mechanical_components: {target: 5}",
+        benches={"refiner": 3},
+    )
+    v = verdict_for(p, "mechanical_components")
+    assert [(r.label, r.state) for r in v.made_from] == [
+        ("Metal Parts ×7", "covers"),  # 70 // 7 = 10 >= 5
+        ("rubber_parts ×3", "partial"),  # 6 // 3 = 2
+    ]
+    assert (v.hint, v.hint_state) == ("Craft 2 now → 2 / 5", "partial")
+
+
+def test_weapon_craft_now_capped_by_lower_copies(plan):
+    p = plan(
+        owned={
+            "renegade_iii": 1,
+            "advanced_mechanical_components": 20,
+            "medium_gun_parts": 20,
+        },
+        rules="loadout: {weapons: {items: [renegade_iv], copies: 2}}",
+        benches={"weapon_bench": 3},
+    )
+    v = verdict_for(p, "renegade_iv")  # shortfall 2, one copy to upgrade
+    assert (v.hint, v.hint_state) == ("Craft 1 now → 1 / 2", "partial")
