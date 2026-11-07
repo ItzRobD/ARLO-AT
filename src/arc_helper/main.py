@@ -18,6 +18,7 @@ from threading import Thread
 
 from dotenv import load_dotenv
 
+from arc_helper.arctracker import AdvisorService
 from arc_helper.clickthrough import make_click_through
 from arc_helper.clickthrough import make_outline
 from arc_helper.config import APP_DIR
@@ -140,6 +141,8 @@ class Scanner:
     state: ScannerState = ScannerState.IDLE
     stats: ScannerStats = field(default_factory=ScannerStats)
     hotkey: HotkeyMonitor = field(default_factory=get_hotkey_monitor)
+    # Personal verdicts from ARC Tracker; None (or no data) -> generic db
+    advisor: AdvisorService | None = None
 
     # UI updates are posted here for the main (GUI) thread to apply. tkinter
     # is not thread-safe, and on Linux/Tcl root.after() called from this
@@ -226,6 +229,8 @@ class Scanner:
                         self.state = ScannerState.ACTIVE
                         self._update_status("active")
                         logger.info("INVENTORY detected - activating tooltip scanner")
+                        if self.advisor is not None:
+                            self.advisor.request_refresh()  # throttled
                     else:
                         # Wait before next trigger scan
                         time.sleep(settings.scan.trigger_scan_interval)
@@ -293,10 +298,11 @@ class Scanner:
 
         if ocr.detection != "cursor" and item_name == self._last_shown_item:
             # Frame mode: the tooltip is still up, so keep the popup up
-            # (show() on an already-visible item only extends its timer).
-            self._show_overlay(
-                item_name, self._lookup_cache.get(item_name), ocr.last_tooltip_bbox
-            )
+            # (an unchanged popup only repositions and extends its timer).
+            if not self._show_verdict(item_name, ocr.last_tooltip_bbox):
+                self._show_overlay(
+                    item_name, self._db_lookup(item_name), ocr.last_tooltip_bbox
+                )
             self._last_shown_time = current_time
             return
 
@@ -311,10 +317,14 @@ class Scanner:
         self.stats.last_item = item_name
         self.stats.last_item_time = current_time
 
-        # Look up in database
-        if item_name not in self._lookup_cache:
-            self._lookup_cache[item_name] = self.db.lookup(item_name)
-        recommendation = self._lookup_cache[item_name]
+        # Personal verdict first; the generic database is the fallback
+        if self._show_verdict(item_name, ocr.last_tooltip_bbox):
+            logger.debug(f"Verdict: {item_name}")
+            self._last_shown_item = item_name
+            self._last_shown_time = current_time
+            return
+
+        recommendation = self._db_lookup(item_name)
 
         if recommendation:
             self.stats.items_found_in_db += 1
@@ -330,6 +340,31 @@ class Scanner:
         # Update cooldown tracking
         self._last_shown_item = item_name
         self._last_shown_time = current_time
+
+    def _db_lookup(self, item_name: str) -> Item | None:
+        """Generic database lookup, memoised by OCR'd name."""
+        if item_name not in self._lookup_cache:
+            self._lookup_cache[item_name] = self.db.lookup(item_name)
+        return self._lookup_cache[item_name]
+
+    def _show_verdict(
+        self, item_name: str, anchor: tuple[int, int, int, int] | None
+    ) -> bool:
+        """Queue the personal verdict; False when there is none to show.
+
+        The advisor memoises verdicts per data set, so calling this every
+        frame-mode scan is cheap, and the overlay skips the redraw while
+        (item, verdict, age, stale) is unchanged.
+        """
+        if self.advisor is None:
+            return False
+        res = self.advisor.lookup(item_name)
+        if res is None:
+            return False
+        verdict, age, stale = res
+        self._overlay_visible = True
+        self.ui_queue.put(("verdict", item_name, verdict, age, stale, anchor))
+        return True
 
     def _show_overlay(
         self,
@@ -364,6 +399,9 @@ class Application:
         # Initialize database
         self.db = get_database()
 
+        # Personal verdicts (no-op without ARCTRACKER_API_KEY)
+        self.advisor = AdvisorService(get_settings())
+
         # Create main Tk root (hidden)
         self.root = tk.Tk()
         self.root.withdraw()  # Hide main window
@@ -385,6 +423,7 @@ class Application:
             overlay=self.overlay,
             status=self.status,
             db=self.db,
+            advisor=self.advisor,
             ui_queue=self.ui_queue,
         )
 
@@ -411,6 +450,8 @@ class Application:
                     self._apply_status(msg[1])
                 elif msg[0] == "overlay":
                     self.overlay.show(msg[1], msg[2], anchor=msg[3])
+                elif msg[0] == "verdict":
+                    self.overlay.show_verdict(*msg[1:5], anchor=msg[5])
                 elif msg[0] == "hide":
                     self.overlay.hide()
         except queue.Empty:
@@ -455,7 +496,8 @@ class Application:
         logger.info("Press Ctrl+C in terminal to quit")
         logger.info("=" * 50)
 
-        # Start scanner
+        # Start the ARC Tracker refresher, then the scanner
+        self.advisor.start()
         self.scanner.start()
 
         # Start the main-thread UI pump (must be scheduled from the main thread)
@@ -470,7 +512,11 @@ class Application:
     def quit(self) -> None:
         """Clean shutdown."""
         logger.info("\nShutting down...")
-        self.scanner.stop()
+        try:
+            self.scanner.stop()
+        finally:
+            # Even when a second Ctrl+C interrupts the scanner join
+            self.advisor.stop(timeout=2.0)
         from arc_helper.screen import reset_backend
 
         reset_backend()  # release the portal session / PipeWire stream
@@ -572,6 +618,7 @@ def main() -> None:
         try:
             sys.path.insert(0, str(APP_DIR))
             from update_db import auto_update
+
             auto_update()
         except Exception as e:  # noqa: BLE001
             logger.debug(f"Wiki auto-update unavailable: {e}")
