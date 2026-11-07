@@ -64,6 +64,11 @@ def check_invariants(p):
         assert all(v > 0 for v in by.values()), (item, by)
     for t in p.targets.values():
         assert t.shortfall >= 0
+        assert t.held >= 0
+        if t.exact is None:  # non-weapon: held comes from its own __self__ units
+            assert t.held <= p.claims.get(t.item_id, {}).get(SELF, 0)
+        else:
+            assert t.exact <= t.held == t.owned
 
 
 def renegade_full_cost(cat):
@@ -132,18 +137,59 @@ def test_higher_tier_wins(plan, rules, cat):
 
 def test_lower_weapon_tier_counts_as_copy(plan, rules, cat):
     p = plan(
-        snap(owned={"renegade_iii": 1}),
+        snap(
+            owned={
+                "renegade_iii": 1,
+                "advanced_mechanical_components": 5,
+                "medium_gun_parts": 5,
+            }
+        ),
         rules("loadout:\n  weapons: {items: [renegade_iv], copies: 1}"),
     )
     t = p.targets["renegade_iv"]
-    assert t.owned == 1
-    assert t.tier == 2
+    assert (t.owned, t.held, t.exact, t.tier) == (1, 1, 0, 2)
     # Brief said renegade_iii.upgrade_cost, but in the catalogue a tier's
     # upgrade_cost is the cost to *reach* it, so III -> IV is renegade_iv's.
-    assert t.craft_inputs == cat.items["renegade_iv"].upgrade_cost
+    up4 = cat.items["renegade_iv"].upgrade_cost
+    assert up4 == {"advanced_mechanical_components": 2, "medium_gun_parts": 2}
+    assert t.craft_inputs == up4
     assert p.claims["renegade_iii"] == {SELF: 1}
     assert p.unclaimed["renegade_iii"] == 0
-    assert t.state == "met"
+    # held but not met: the III -> IV upgrade is demanded and claimed
+    for ing, q in up4.items():
+        assert p.demand[ing] == {"renegade_iv": q}
+        assert p.claims[ing] == {"renegade_iv": q}
+    assert t.state == "building"
+    assert t.shortfall == 1
+
+
+def test_lower_copy_plus_missing_copy(plan, rules, cat):
+    p = plan(
+        snap(owned={"renegade_iii": 1}),
+        rules("loadout:\n  weapons: {items: [renegade_iv], copies: 2}"),
+    )
+    t = p.targets["renegade_iv"]
+    up4, full = cat.items["renegade_iv"].upgrade_cost, renegade_full_cost(cat)
+    expected = {k: up4.get(k, 0) + full.get(k, 0) for k in up4 | full}
+    assert expected == {
+        "advanced_mechanical_components": 8,
+        "medium_gun_parts": 11,
+        "oil": 5,
+    }
+    assert {ing: by["renegade_iv"] for ing, by in p.demand.items()} == expected
+    assert (t.held, t.exact, t.state, t.shortfall) == (1, 0, "low", 2)
+    assert t.craft_inputs == up4  # next copy: upgrade the held III
+
+
+def test_overlapping_chains_do_not_double_count(plan, rules):
+    p = plan(
+        snap(owned={"renegade_ii": 1}),
+        rules("loadout:\n  weapons: {items: [renegade_ii, renegade_iv], copies: 1}"),
+    )
+    assert p.claims["renegade_ii"] == {SELF: 1}
+    ii, iv = p.targets["renegade_ii"], p.targets["renegade_iv"]
+    assert (ii.owned, ii.state) == (1, "met")
+    assert (iv.owned, iv.held, iv.state) == (0, 0, "low")
 
 
 def test_keep_amount_raises_target(plan, rules):
@@ -182,7 +228,7 @@ def test_effective_target_variants(rules):
 def test_keep_only_target_is_tier_5(plan, rules):
     p = plan(snap(owned={"wires": 3}, keep={"wires": 7}), rules(""))
     t = p.targets["wires"]
-    assert (t.min, t.ideal, t.tier, t.owned) == (7, 7, 5, 3)
+    assert (t.min, t.ideal, t.tier, t.owned, t.held) == (7, 7, 5, 3, 3)
     assert t.state == "low"
     assert t.shortfall == 4
     assert p.claims["wires"] == {SELF: 3}
@@ -192,11 +238,27 @@ def test_keep_only_target_is_tier_5(plan, rules):
 
 
 @pytest.mark.parametrize(
-    ("owned", "state", "short"),
+    ("held", "state", "short"),
     [(0, "low", 10), (4, "low", 6), (5, "building", 5), (10, "met", 0), (12, "met", 0)],
 )
-def test_target_state(owned, state, short):
-    t = TargetState("x", owned, 5, 10, 5, {})
+def test_target_state_uses_held_not_owned(held, state, short):
+    t = TargetState("x", 99, 5, 10, 5, {}, held)
+    assert t.state == state
+    assert t.shortfall == short
+
+
+@pytest.mark.parametrize(
+    ("held", "exact", "state", "short"),
+    [
+        (0, 0, "low", 2),
+        (1, 1, "low", 1),
+        (2, 0, "building", 2),
+        (2, 1, "building", 1),
+        (2, 2, "met", 0),
+    ],
+)
+def test_weapon_target_state(held, exact, state, short):
+    t = TargetState("w", held, 2, 2, 2, {}, held, exact)
     assert t.state == state
     assert t.shortfall == short
 
@@ -224,6 +286,14 @@ def test_need_units_are_not_counted_for_target(plan, rules):
     )
     assert p.claims["oil"] == {NEED: 4, SELF: 2}
     assert p.unclaimed["oil"] == 0
+    t = p.targets["oil"]
+    assert (t.owned, t.held, t.state, t.shortfall) == (6, 2, "low", 3)
+    p = plan(
+        snap(owned={"oil": 6}, needs=[("oil", 4, "project")]),
+        rules("oil: {min: 2, ideal: 5}"),
+    )
+    t = p.targets["oil"]
+    assert (t.held, t.state, t.shortfall) == (2, "building", 3)
 
 
 def test_need_for_unowned_item(plan, rules):
@@ -243,7 +313,7 @@ def test_zero_copies_creates_target_but_protects_nothing(plan, rules):
         rules("loadout:\n  weapons: {items: [renegade_iv], copies: 0}"),
     )
     t = p.targets["renegade_iv"]
-    assert (t.min, t.ideal, t.owned, t.state) == (0, 0, 1, "met")
+    assert (t.min, t.ideal, t.owned, t.held, t.state) == (0, 0, 0, 0, "met")
     assert p.claims == {}
     assert p.unclaimed == {"renegade_iv": 1, "medium_gun_parts": 4}
 
@@ -279,18 +349,22 @@ def test_weapon_copies_prefer_highest_tier_and_count_all_tiers(plan, rules, cat)
         rules("loadout:\n  weapons: {items: [renegade_iv], copies: 3}"),
     )
     t = p.targets["renegade_iv"]
-    assert t.owned == 4
+    assert (t.owned, t.held, t.exact, t.state, t.shortfall) == (3, 3, 1, "building", 2)
     assert p.claims["renegade_iv"] == {SELF: 1}
     assert p.claims["renegade_ii"] == {SELF: 1}
     assert p.claims["renegade_i"] == {SELF: 1}
     assert p.unclaimed["renegade_i"] == 1
-    # best owned tier below IV is II: upgrades to III and IV remain
-    up3, up4 = (
-        cat.items["renegade_iii"].upgrade_cost,
-        cat.items["renegade_iv"].upgrade_cost,
+    up2, up3, up4 = (
+        cat.items[f"renegade_{n}"].upgrade_cost for n in ("ii", "iii", "iv")
     )
+    # next copy: best held lower copy is II, so upgrades to III and IV
     assert t.craft_inputs == {k: up3.get(k, 0) + up4.get(k, 0) for k in up3 | up4}
-    assert p.demand == {}  # 3 copies held, nothing to craft
+    # demand: II->IV for the held II plus I->IV for the held I
+    want: dict[str, int] = {}
+    for cost in (up3, up4, up2, up3, up4):
+        for k, v in cost.items():
+            want[k] = want.get(k, 0) + v
+    assert {ing: by["renegade_iv"] for ing, by in p.demand.items()} == want
 
 
 def test_weapon_owned_at_target_tier_needs_full_craft_for_more_copies(plan, rules, cat):
@@ -302,6 +376,7 @@ def test_weapon_owned_at_target_tier_needs_full_craft_for_more_copies(plan, rule
     assert t.craft_inputs == renegade_full_cost(cat)
     assert p.claims["oil"] == {"renegade_iv": 5}
     assert p.unclaimed["oil"] == 15
+    assert (t.held, t.exact, t.state, t.shortfall) == (1, 1, "low", 1)
 
 
 def test_weapon_shortfall_demands_per_copy(plan, rules, cat):
@@ -335,15 +410,31 @@ def test_unresolvable_chain_has_no_craft_inputs(plan):
     # owning gun_ii means only II -> III is left, which is resolvable
     p = plan(snap(owned={"oil": 10, "gun_ii": 1}), r, broken)
     assert p.targets["gun_iii"].craft_inputs == {"oil": 1}
+    assert p.claims["oil"] == {"gun_iii": 1}
 
 
 def test_tiers_and_min_before_ideal_ordering(plan, rules):
-    # Both tier 5; the second target's min is served before the first's ideal.
+    # Same tier, shared ingredient: both mins are served before either ideal,
+    # so the second target gets 8 instead of the first taking all 12 at ideal.
     p = plan(
-        snap(owned={"oil": 10}),
-        rules("oil: {min: 2, ideal: 10}\ncanister: {target: 1}"),
+        snap(owned={"simple_gun_parts": 12}),
+        rules(
+            "light_gun_parts: {min: 1, ideal: 5}\nheavy_gun_parts: {min: 2, ideal: 5}"
+        ),
     )
-    assert p.claims["oil"] == {SELF: 10}
+    assert p.claims["simple_gun_parts"] == {"light_gun_parts": 4, "heavy_gun_parts": 8}
+    assert p.demand["simple_gun_parts"] == {
+        "light_gun_parts": 20,
+        "heavy_gun_parts": 20,
+    }
+    # leftovers after both mins go to the ideal pass in file order
+    p = plan(
+        snap(owned={"simple_gun_parts": 20}),
+        rules(
+            "light_gun_parts: {min: 1, ideal: 5}\nheavy_gun_parts: {min: 2, ideal: 5}"
+        ),
+    )
+    assert p.claims["simple_gun_parts"] == {"light_gun_parts": 12, "heavy_gun_parts": 8}
     p = plan(
         snap(owned={"simple_gun_parts": 8}),
         rules(

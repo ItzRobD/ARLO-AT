@@ -4,6 +4,9 @@ Priority (lower tier first): 1 ARC Tracker needs, 2 loadout weapons, 3 other
 loadout groups, 4..6 rules.yaml / ARC keep targets. Within a tier, targets keep
 their file order and are served in two passes: every ``min`` first, then every
 ``ideal``. A target that is short claims the ingredients to craft the shortfall.
+A loadout weapon W with C copies holds exact W copies first, then lower-tier
+copies (highest tier first); a held lower copy still demands its upgrade cost to
+W, and each missing copy demands the full tier I recipe plus every upgrade.
 Units are claimed at most once, so a later Keep/Sell verdict can sell only what
 is left in ``Plan.unclaimed``.
 """
@@ -11,6 +14,7 @@ is left in ``Plan.unclaimed``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 from typing import TYPE_CHECKING
 from typing import Literal
 
@@ -31,23 +35,30 @@ WEAPON_TIER = 2
 @dataclass(frozen=True)
 class TargetState:
     item_id: str
-    owned: int
+    owned: int  # raw owned count; for weapons the chain units held for it
     min: int
     ideal: int
     tier: int
-    craft_inputs: dict[str, int]
+    craft_inputs: dict[str, int]  # per-unit cost of the next unit / copy
+    held: int = 0  # units claimed __self__ for this target
+    exact: int | None = None  # weapons only: held copies at the target tier
 
     @property
     def state(self) -> Literal["low", "building", "met"]:
-        if self.owned < self.min:
+        if self.exact is not None:  # weapon: lower-tier copies are not "met"
+            if self.exact >= self.ideal:
+                return "met"
+            return "low" if self.held < self.min else "building"
+        if self.held < self.min:
             return "low"
-        if self.owned < self.ideal:
+        if self.held < self.ideal:
             return "building"
         return "met"
 
     @property
     def shortfall(self) -> int:
-        return max(0, self.ideal - self.owned)
+        have = self.exact if self.exact is not None else self.held
+        return max(0, self.ideal - have)
 
 
 @dataclass(frozen=True)
@@ -69,8 +80,14 @@ class Plan:
 class _Spec:
     item_id: str
     target: Target
-    units: tuple[str, ...]  # items whose units count as this target, best first
-    craft_inputs: dict[str, int]
+    recipe: dict[str, int]  # per-unit craft cost (non-weapons)
+    chain: tuple[str, ...] | None = None  # weapons: tier I .. item_id
+
+
+@dataclass
+class _Held:
+    total: int = 0
+    lower: dict[int, int] = field(default_factory=dict)  # chain index -> copies
 
 
 def _raise_to_keep(target: Target, keep: int | None) -> Target:
@@ -97,16 +114,16 @@ def effective_target(
     return _raise_to_keep(target, keep)
 
 
-def _add(total: dict[str, int], more: dict[str, int]) -> None:
+def _add(total: dict[str, int], more: dict[str, int], times: int = 1) -> None:
     for k, v in more.items():
-        total[k] = total.get(k, 0) + v
+        total[k] = total.get(k, 0) + v * times
 
 
-def _weapon_inputs(
-    catalogue: Catalogue, chain: list[str], owned: dict[str, int]
+def _chain_cost(
+    catalogue: Catalogue, chain: tuple[str, ...], start: int
 ) -> dict[str, int]:
-    """Per-copy cost to reach chain[-1]: upgrades from the best owned lower tier,
-    else the tier I recipe plus every upgrade. {} when any step is unknown.
+    """Cost to bring one copy at chain[start] up to chain[-1]; start -1 means
+    crafting from scratch (tier I recipe + every upgrade). {} when unknown.
 
     A tier's ``upgrade_cost`` is the cost to reach it from the tier below
     (tier I's carries its first upgrade, so it is never used here).
@@ -114,17 +131,13 @@ def _weapon_inputs(
     if any(x not in catalogue.items for x in chain):
         return {}
     items = [catalogue.items[x] for x in chain]
-    start = 0
-    for idx in range(len(chain) - 1):
-        if owned.get(chain[idx], 0) > 0:
-            start = idx + 1
     total: dict[str, int] = {}
-    if start == 0:
+    if start < 0:
         if not items[0].recipe:
             return {}
         _add(total, items[0].recipe)
-        start = 1
-    for item in items[start:]:
+        start = 0
+    for item in items[start + 1 :]:
         if not item.upgrade_cost:
             return {}
         _add(total, item.upgrade_cost)
@@ -132,10 +145,7 @@ def _weapon_inputs(
 
 
 def _specs(
-    catalogue: Catalogue,
-    snapshot: PlayerSnapshot | None,
-    rules: Rules,
-    owned: dict[str, int],
+    catalogue: Catalogue, snapshot: PlayerSnapshot | None, rules: Rules
 ) -> dict[str, _Spec]:
     specs: dict[str, _Spec] = {}
     for group in rules.loadout:
@@ -148,35 +158,24 @@ def _specs(
                 Target(group.copies, group.copies, group.tier),
                 _keep(snapshot, item_id),
             )
+            chain = None
             if group.tier == WEAPON_TIER:
-                chain = (
+                chain = tuple(
                     catalogue.weapon_chain(item_id)
                     if item_id in catalogue.items
                     else [item_id]
                 )
-                specs[item_id] = _Spec(
-                    item_id,
-                    target,
-                    tuple(reversed(chain)),
-                    _weapon_inputs(catalogue, chain, owned),
-                )
-            else:
-                specs[item_id] = _Spec(
-                    item_id, target, (item_id,), _recipe(catalogue, item_id)
-                )
+            specs[item_id] = _Spec(item_id, target, _recipe(catalogue, item_id), chain)
     for item_id, base in rules.targets.items():
         if item_id not in specs:
             target = _raise_to_keep(base, _keep(snapshot, item_id))
-            specs[item_id] = _Spec(
-                item_id, target, (item_id,), _recipe(catalogue, item_id)
-            )
+            specs[item_id] = _Spec(item_id, target, _recipe(catalogue, item_id))
     if snapshot is not None:
         for item_id, keep in snapshot.keep_amounts.items():
             if item_id not in specs and keep > 0:
                 specs[item_id] = _Spec(
                     item_id,
                     Target(keep, keep, DEFAULT_TIER),
-                    (item_id,),
                     _recipe(catalogue, item_id),
                 )
     return specs
@@ -219,37 +218,54 @@ def build_plan(
     }
 
     # Tiers 2..6: loadout and reserve targets.
-    specs = _specs(catalogue, snapshot, rules, owned)
-    held = dict.fromkeys(specs, 0)  # units claimed for each target itself
+    specs = _specs(catalogue, snapshot, rules)
+    held = {item_id: _Held() for item_id in specs}
+    full_cost = {
+        s.item_id: _chain_cost(catalogue, s.chain, -1)
+        for s in specs.values()
+        if s.chain is not None
+    }
+
+    def weapon_want(s: _Spec, goal: int) -> dict[str, int]:
+        assert s.chain is not None
+        h = held[s.item_id]
+        top = len(s.chain) - 1
+        h.total += claim(s.chain[top], SELF, goal - h.total)
+        for idx in range(top - 1, -1, -1):
+            got = claim(s.chain[idx], SELF, goal - h.total)
+            if got:
+                h.lower[idx] = h.lower.get(idx, 0) + got
+                h.total += got
+        want: dict[str, int] = {}
+        for idx, copies in h.lower.items():
+            _add(want, _chain_cost(catalogue, s.chain, idx), copies)
+        _add(want, full_cost[s.item_id], max(0, goal - h.total))
+        return want
+
+    def item_want(s: _Spec, goal: int) -> dict[str, int]:
+        h = held[s.item_id]
+        h.total += claim(s.item_id, SELF, goal - h.total)
+        want: dict[str, int] = {}
+        _add(want, s.recipe, max(0, goal - h.total))
+        return want
+
     for tier in sorted({s.target.tier for s in specs.values()}):
         group = [s for s in specs.values() if s.target.tier == tier]
         for level in ("min", "ideal"):
             for s in group:
                 goal = s.target.min if level == "min" else s.target.ideal
-                for unit in s.units:
-                    if held[s.item_id] >= goal:
-                        break
-                    held[s.item_id] += claim(unit, SELF, goal - held[s.item_id])
-                short = goal - held[s.item_id]
-                if short <= 0:
-                    continue
-                for ing, qty in s.craft_inputs.items():
-                    want = short * qty
-                    if want <= 0:
+                want = (
+                    weapon_want(s, goal) if s.chain is not None else item_want(s, goal)
+                )
+                for ing, units in want.items():
+                    if units <= 0:
                         continue
                     by = demand.setdefault(ing, {})
-                    by[s.item_id] = max(by.get(s.item_id, 0), want)
-                    claim(ing, s.item_id, want - claims.get(ing, {}).get(s.item_id, 0))
+                    by[s.item_id] = max(by.get(s.item_id, 0), units)
+                    claim(ing, s.item_id, units - claims.get(ing, {}).get(s.item_id, 0))
 
     targets = {
-        s.item_id: TargetState(
-            s.item_id,
-            sum(owned.get(u, 0) for u in s.units),
-            s.target.min,
-            s.target.ideal,
-            s.target.tier,
-            s.craft_inputs,
-        )
+        s.item_id: _state(s, held[s.item_id], owned, full_cost, catalogue)
         for s in specs.values()
     }
     return Plan(
@@ -264,4 +280,34 @@ def build_plan(
         demand=demand,
         unclaimed=remaining,
         need_totals=need_totals,
+    )
+
+
+def _state(
+    s: _Spec,
+    h: _Held,
+    owned: dict[str, int],
+    full_cost: dict[str, dict[str, int]],
+    catalogue: Catalogue,
+) -> TargetState:
+    t = s.target
+    if s.chain is None:
+        return TargetState(
+            s.item_id,
+            owned.get(s.item_id, 0),
+            t.min,
+            t.ideal,
+            t.tier,
+            s.recipe,
+            h.total,
+        )
+    exact = h.total - sum(h.lower.values())
+    # next copy: upgrade the best held lower copy, else craft from scratch
+    inputs = (
+        _chain_cost(catalogue, s.chain, max(h.lower))
+        if h.lower
+        else full_cost[s.item_id]
+    )
+    return TargetState(
+        s.item_id, h.total, t.min, t.ideal, t.tier, inputs, h.total, exact
     )
