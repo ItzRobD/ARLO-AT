@@ -195,8 +195,15 @@ class OverlaySettings(BaseSettings):
         extra="ignore",
     )
 
-    x: int = Field(default=100, description="Overlay X position")
-    y: int = Field(default=100, description="Overlay Y position")
+    x: int = Field(default=100, description="Overlay X position (anchor=fixed)")
+    y: int = Field(default=100, description="Overlay Y position (anchor=fixed)")
+    anchor: str = Field(
+        default="tooltip",
+        description="tooltip: beside the game's tooltip; fixed: at OVERLAY_X/Y",
+    )
+    scale: float = Field(
+        default=1.0, ge=0.5, le=4.0, description="Popup size multiplier"
+    )
     display_time: float = Field(
         default=4.0, description="How long overlay stays visible"
     )
@@ -245,6 +252,12 @@ class Settings(BaseSettings):
 
     # Database in app directory
     database_path: Path = Field(default_factory=lambda: APP_DIR / "items.db")
+
+    # How to find the item tooltip: frame (search the whole screen for it)
+    # or cursor (fixed box at TOOLTIP_CAPTURE_* offsets from the cursor)
+    tooltip_detection: str = Field(
+        default="frame", description="Tooltip detection: frame or cursor"
+    )
 
     # Screen capture backend: auto | x11 | wayland (Linux only)
     screen_backend: str = Field(
@@ -295,6 +308,9 @@ class Settings(BaseSettings):
             f"OVERLAY_Y={self.overlay.y}",
             f"OVERLAY_DISPLAY_TIME={self.overlay.display_time}",
             f"OVERLAY_COOLDOWN={self.overlay.cooldown}",
+            f"OVERLAY_ANCHOR={self.overlay.anchor}",
+            f"OVERLAY_SCALE={self.overlay.scale}",
+            f"TOOLTIP_DETECTION={self.tooltip_detection}",
             "",
             "# Scan intervals",
             f"TRIGGER_SCAN_INTERVAL={self.scan.trigger_scan_interval}",

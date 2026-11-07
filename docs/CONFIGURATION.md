@@ -23,8 +23,11 @@ TRIGGER_REGION2_WIDTH=173
 TRIGGER_REGION2_HEIGHT=44
 
 # =============================================================================
-# TOOLTIP CAPTURE - Area captured around cursor to find tooltip
+# TOOLTIP CAPTURE - How the item tooltip is found
 # =============================================================================
+TOOLTIP_DETECTION=frame          # frame: search the whole screen for the tooltip
+                                 # cursor: fixed box at the offsets below
+# Used only with TOOLTIP_DETECTION=cursor:
 
 TOOLTIP_CAPTURE_WIDTH=550
 TOOLTIP_CAPTURE_HEIGHT=550
@@ -35,8 +38,10 @@ TOOLTIP_CAPTURE_OFFSET_Y=-500    # Vertical offset from cursor (negative = above
 # OVERLAY SETTINGS - How the recommendation overlay appears
 # =============================================================================
 
-OVERLAY_X=100                    # Overlay X position on screen
-OVERLAY_Y=100                    # Overlay Y position on screen
+OVERLAY_ANCHOR=tooltip           # tooltip: beside the game's tooltip; fixed: at X/Y
+OVERLAY_SCALE=1.0                # Popup size multiplier (0.5 - 4.0)
+OVERLAY_X=100                    # Overlay X position (OVERLAY_ANCHOR=fixed)
+OVERLAY_Y=100                    # Overlay Y position (OVERLAY_ANCHOR=fixed)
 OVERLAY_DISPLAY_TIME=4.0         # How long the overlay stays visible (seconds)
 OVERLAY_COOLDOWN=2.0             # Minimum time between showing same item (seconds)
 

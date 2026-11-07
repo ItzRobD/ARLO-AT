@@ -74,14 +74,25 @@ class DebugOverlay:
             from arc_helper.screen import phys_to_tk
             from arc_helper.screen import phys_to_tk_pos
 
-            cursor = get_cursor_position()
-
-            x, y = phys_to_tk_pos(
-                cursor.x + self.settings.tooltip_capture.offset_x,
-                cursor.y + self.settings.tooltip_capture.offset_y,
-            )
-            w = phys_to_tk(self.settings.tooltip_capture.width)
-            h = phys_to_tk(self.settings.tooltip_capture.height)
+            if self.settings.tooltip_detection.lower() != "cursor":
+                # Frame mode: outline the tooltip that was actually found
+                bbox = get_ocr_engine().last_tooltip_bbox
+                if bbox is None:
+                    self.window.withdraw()
+                    self.root.after(50, self._update_position)
+                    return
+                self.window.deiconify()
+                left, top, right, bottom = bbox
+                x, y = phys_to_tk_pos(left, top)
+                w, h = phys_to_tk(right - left), phys_to_tk(bottom - top)
+            else:
+                cursor = get_cursor_position()
+                x, y = phys_to_tk_pos(
+                    cursor.x + self.settings.tooltip_capture.offset_x,
+                    cursor.y + self.settings.tooltip_capture.offset_y,
+                )
+                w = phys_to_tk(self.settings.tooltip_capture.width)
+                h = phys_to_tk(self.settings.tooltip_capture.height)
 
             self.window.geometry(f"{w}x{h}+{x}+{y}")
             if self._shaped_size != (w, h):
@@ -243,7 +254,7 @@ class Scanner:
                             continue
 
                     # Scan tooltip at cursor position
-                    item_name = ocr.extract_item_name_at_cursor()
+                    item_name = ocr.read_hovered_item_name()
                     self.stats.tooltip_scans += 1
 
                     if item_name:
@@ -289,16 +300,22 @@ class Scanner:
             # Log to missing items file for easier database updates
             self.db.log_missing_item(item_name)
 
-        # Show overlay (must be done on main thread)
-        self._show_overlay(item_name, recommendation)
+        # Show overlay (must be done on main thread), beside the tooltip
+        anchor = get_ocr_engine().last_tooltip_bbox
+        self._show_overlay(item_name, recommendation, anchor)
 
         # Update cooldown tracking
         self._last_shown_item = item_name
         self._last_shown_time = current_time
 
-    def _show_overlay(self, item_name: str, recommendation: Item | None) -> None:
+    def _show_overlay(
+        self,
+        item_name: str,
+        recommendation: Item | None,
+        anchor: tuple[int, int, int, int] | None = None,
+    ) -> None:
         """Queue an overlay update for the main (GUI) thread to apply."""
-        self.ui_queue.put(("overlay", item_name, recommendation))
+        self.ui_queue.put(("overlay", item_name, recommendation, anchor))
 
     def _update_status(self, status: str) -> None:
         """Queue a status update for the main (GUI) thread to apply."""
@@ -362,7 +379,7 @@ class Application:
                 if msg[0] == "status":
                     self._apply_status(msg[1])
                 elif msg[0] == "overlay":
-                    self.overlay.show(msg[1], msg[2])
+                    self.overlay.show(msg[1], msg[2], anchor=msg[3])
         except queue.Empty:
             pass
         self.root.after(50, self._pump_ui_queue)

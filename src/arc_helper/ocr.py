@@ -19,6 +19,7 @@ from .config import logger
 from .screen import Point
 from .screen import ScreenCaptureUnavailable
 from .screen import get_backend
+from .tooltip_finder import find_tooltip
 
 
 def grab_screen(bbox: tuple[int, int, int, int]) -> Image.Image:
@@ -69,6 +70,12 @@ class OCREngine:
         self.tooltip_height = settings.tooltip_capture.height
         self.tooltip_offset_x = settings.tooltip_capture.offset_x
         self.tooltip_offset_y = settings.tooltip_capture.offset_y
+
+        self.detection = settings.tooltip_detection.lower()
+
+        # Physical-pixel bbox of the last tooltip found by frame detection;
+        # read (atomically) by the GUI thread to anchor the popup.
+        self.last_tooltip_bbox: tuple[int, int, int, int] | None = None
 
         if self.debug_mode:
             self.debug_dir.mkdir(parents=True, exist_ok=True)
@@ -409,6 +416,60 @@ class OCREngine:
             pass
 
         return False
+
+    # Share of the tooltip body (from the top) that is OCR'd: the name and
+    # the first description line, which ends the name block. Skipping the
+    # rest cuts Tesseract time by about a quarter.
+    TOOLTIP_READ_FRAC = 0.5
+
+    def read_hovered_item_name(self) -> str | None:
+        """Read the hovered item's name using the configured detection mode."""
+        if self.detection == "cursor":
+            self.last_tooltip_bbox = None
+            return self.extract_item_name_at_cursor()
+        return self.extract_item_name_from_frame()
+
+    def extract_item_name_from_frame(self) -> str | None:
+        """Find the tooltip anywhere on the game monitor and read its name."""
+        width, height = get_screen_resolution()
+        try:
+            frame = grab_screen((0, 0, width, height))
+        except ScreenCaptureUnavailable:
+            raise
+        except OSError as e:
+            logger.error(f"Full-frame grab failed: {e}")
+            return None
+
+        bbox = find_tooltip(np.asarray(frame))
+        self.last_tooltip_bbox = bbox
+        if bbox is None:
+            return None
+
+        left, top, right, bottom = bbox
+        pad = 8
+        read_bottom = top + int((bottom - top) * self.TOOLTIP_READ_FRAC)
+        image = frame.crop((
+            max(0, left - pad),
+            max(0, top - pad),
+            min(width, right + pad),
+            min(height, read_bottom),
+        ))
+        if self.debug_mode:
+            logger.debug(f"Tooltip found at {bbox}")
+            image.save(self.debug_dir / "tooltip_capture_raw.png")
+            self._maybe_save_full_frame(width, height)
+
+        processed = self.preprocess_tooltip(image)
+        if self.debug_mode:
+            processed.save(self.debug_dir / "tooltip_capture_processed.png")
+        try:
+            item_name = self._read_item_name(processed)
+        except pytesseract.TesseractError as e:
+            logger.error(f"OCR Error: {e}")
+            return None
+        if item_name:
+            logger.debug(f"Extracted item name: '{item_name}'")
+        return item_name
 
     def extract_item_name_at_cursor(self) -> str | None:
         """
