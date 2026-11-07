@@ -57,3 +57,15 @@ def test_popup_falls_back_to_left_at_screen_edge():
 def test_popup_clamped_vertically():
     _, y = place_beside((1212, 1300, 1716, 1430), (400, 300), (3440, 1440))
     assert y == 1440 - 300
+
+
+def test_full_width_grey_box_does_not_split_tooltip():
+    # Regression: Crude Explosives / Skulker Targeter tooltips have a grey
+    # description box and stat rows spanning nearly the full width, which
+    # split the cream run so only the lower half (no name) was found.
+    frame = _tooltip(_frame(), 1072, 424, 1576, 1116)
+    frame[600:680, 1072 + 24 : 1576 - 24] = (215, 210, 200)  # grey box
+    frame[700:760, 1072 + 24 : 1576 - 24] = (60, 60, 60)  # stats rows
+    left, top, right, bottom = find_tooltip(frame)
+    assert abs(top - 424) <= 4
+    assert abs(bottom - 1116) <= 4

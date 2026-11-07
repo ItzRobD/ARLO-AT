@@ -73,4 +73,15 @@ def find_tooltip(
     if cols is None or cols[1] - cols[0] < min_px:
         return None
 
+    # The run above can stop early at grey description boxes or stat rows
+    # that span nearly the full width. The tooltip's left and right padding
+    # stays cream through all of those, so re-derive the vertical extent
+    # from the rows whose both edge margins are cream.
+    margin = max(2, (cols[1] - cols[0]) // 25)
+    left_edge = mask[:, cols[0] : cols[0] + margin].mean(axis=1)
+    right_edge = mask[:, cols[1] - margin : cols[1]].mean(axis=1)
+    edges = _longest_run((left_edge >= 0.6) & (right_edge >= 0.6), 1)
+    if edges is not None and edges[0] <= rows[0] < edges[1]:
+        rows = (min(rows[0], edges[0]), max(rows[1], edges[1]))
+
     return (cols[0] * step, rows[0] * step, cols[1] * step, rows[1] * step)
