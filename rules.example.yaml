@@ -1,0 +1,32 @@
+# Copy to rules.yaml and edit; rules.yaml is gitignored.
+# Keys are ARC Tracker item ids. All numbers below are illustrative.
+
+# Plain counts: keep at least `min`, aim for `ideal`.
+light_gun_parts: {min: 10, ideal: 40}
+# A single exact count.
+oil: {target: 30}
+# Rows (4 stacks each) and stacks, scaled by the item's stack size.
+smoke_grenade: {rows: 1}
+rope: {stacks: [1, 2]}          # a range: min 1 stack, ideal 2
+# Tier 4..6 marks how much the item matters (default 5).
+wolfpack: {rows: 1, tier: 4}
+# Actions: keep | sell | recycle | buy_on_demand, with an optional note.
+herbal_bandage: {action: keep, note: Preferred healing}
+bombardier_cell: {action: recycle, note: Recycle unless required}
+arc_alloy: {action: sell}
+light_ammo: {action: buy_on_demand}
+# Override the automatic category (weapons, consumables, medical, crafting, base, arc_rare).
+planks: {stacks: 1, category: crafting}
+
+# Loadout groups: the verdict keeps `copies` of each listed item.
+loadout:
+  weapons:
+    items: [renegade_iv, stitcher_iv]
+    copies: 1
+  shields:
+    items: [medium_shield]
+    copies: 0
+
+# Keep keys of these rarities.
+keys:
+  keep_rarities: [Rare, Epic, Legendary]
