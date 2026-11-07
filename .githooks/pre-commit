@@ -3,7 +3,7 @@
 # Enabled with: git config core.hooksPath .githooks
 set -euo pipefail
 
-blocked_paths='(^|/)\.env($|\.)|(^|/)cache/|(^|/)screenshots/|(^|/)gpt-plan/|\.screencast_restore_token|(^|/)debug/|(^|/)snapshot\.json$'
+blocked_paths='(^|/)rules\.yaml$|(^|/)\.env($|\.)|(^|/)cache/|(^|/)screenshots/|(^|/)gpt-plan/|\.screencast_restore_token|(^|/)debug/|(^|/)snapshot\.json$'
 allowed_paths='(^|/)\.env\.example$'
 
 fail=0

@@ -49,7 +49,8 @@ src/arc_helper/arctracker/
 src/arc_helper/overlay.py   # + VerdictView rendering inside OverlayWindow
 src/arc_helper/main.py      # scanner uses AdvisorService, refresh on INVENTORY
 src/arc_helper/config.py    # + ArcTracker settings
-rules.yaml                  # owner's rules (committed)
+rules.example.yaml          # generic example rules (committed)
+rules.yaml                  # owner's personal rules (gitignored, never committed)
 tests/arctracker/           # unit tests + fixtures/
 ```
 
@@ -520,10 +521,10 @@ def test_fallback_show_has_age_dash(root): ...   # show(name, Item(...)) -> age 
 
 ---
 
-### Task 8: Owner's initial rules.yaml
+### Task 8: Owner's rules.yaml (local) and rules.example.yaml
 
 **Files:**
-- Create: `rules.yaml`, `tests/arctracker/test_owner_rules.py`
+- Create: `rules.yaml` (local only: gitignored and blocked by `.githooks/pre-commit`; never `git add` it), `rules.example.yaml` (committed: a short generic example showing every field, loadout and keys with common items and no personal numbers), `tests/arctracker/test_owner_rules.py`
 
 **Interfaces:**
 - Consumes: `parse_rules` (Task 3), the full live catalogue (cached in `cache/catalogue.json` by Task 6, or fetched in the test with skip-if-offline)
@@ -538,9 +539,9 @@ def test_fallback_show_has_age_dash(root): ...   # show(name, Item(...)) -> age 
   - `loadout`: weapons `[renegade_iv, anvil_iv, il_toro_iv, stitcher_iv]` copies 1 (placeholder, flagged in a comment), shields `[medium_shield]` copies 0, augments `[tactical_mk3_smoke, combat_mk3_flanking]` copies 0.
   - `keys: {keep_rarities: [Rare, Epic, Legendary]}`.
   - Group names like "Exodus Materials", "Base materials" or "Other healing" that map to several items: list each real item. If unsure of membership, leave it out and list it in the commit message for the owner.
-- [ ] **Step 2: Write the test:** `parse_rules(Path("rules.yaml").read_text(), live_catalogue).errors == ()`, and spot checks: `targets["light_gun_parts"] == Target(15, 50, 5)`; `targets["smoke_grenade"].ideal == 20`.
+- [ ] **Step 2: Write the test:** `rules.example.yaml` always parses with `errors == ()` against the live catalogue. When a local `rules.yaml` exists (skip otherwise), `parse_rules(Path("rules.yaml").read_text(), live_catalogue).errors == ()`, and spot checks: `targets["light_gun_parts"] == Target(15, 50, 5)`; `targets["smoke_grenade"].ideal == 20`.
 - [ ] **Step 3: Run it.** `uv run pytest tests/arctracker/test_owner_rules.py -v` → PASS (skips when offline with no cache).
-- [ ] **Step 4: Commit and push** (`"Add owner's rules.yaml translated from stash audit ruleset"`).
+- [ ] **Step 4: Commit and push** `rules.example.yaml` and the test only (`"Add example rules file and rules validation test"`). Confirm `git status` doesn't list `rules.yaml`.
 - [ ] **Step 5: Owner review.** Show the owner the file grouped by section, with the flagged placeholders and uncertain group memberships, and apply their corrections. This blocks Task 9.
 
 ---
@@ -550,4 +551,4 @@ def test_fallback_show_has_age_dash(root): ...   # show(name, Item(...)) -> age 
 - [ ] **Step 1:** The owner creates a personal API key (ARC Tracker → Settings → Developer Access, read scopes) and adds `ARCTRACKER_API_KEY=…` to `.env`.
 - [ ] **Step 2:** Run `ARCTRACKER_API_KEY=… uv run pytest tests/arctracker/test_mcp_live.py -v` → PASS.
 - [ ] **Step 3:** The owner runs `uv run arc-helper` in-game and hovers: a quest item, a gun part below ideal, Simple Gun Parts, a surplus material, a key, and an item not in the catalogue. Compare each popup against the spec table. Log mismatches as fixes on this branch.
-- [ ] **Step 4:** Update `README.md` (setup: API key, `rules.yaml`, popup legend) and `docs/CONFIGURATION.md` (new settings). Commit, push, and open a PR from `feat/arctracker` into `master`.
+- [ ] **Step 4:** Update `README.md` (setup: API key, copy `rules.example.yaml` to `rules.yaml`, popup legend) and `docs/CONFIGURATION.md` (new settings). Commit, push, and open a PR from `feat/arctracker` into `master`.
