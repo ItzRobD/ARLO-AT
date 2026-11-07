@@ -10,6 +10,7 @@ item a need, the loadout or a reserve holds is never sold.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from operator import itemgetter
@@ -286,6 +287,58 @@ def verdict_for(plan: Plan, item_id: str) -> Verdict:
         hint=hint,
         hint_state=hint_state,
     )
+
+
+def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
+    """Crafting-screen verdict: crafts still needed to reach the ideal target.
+
+    The target is every ARC Tracker need for the item plus its rules.yaml /
+    loadout ideal (needs are served first, so the two add up). Crafts are
+    counted per craft, so a recipe yielding several units counts once.
+    """
+    item = plan.catalogue.items.get(item_id)
+    if item is None:
+        return unknown_verdict(plan.rules.categories.get(item_id, ""))
+    category = plan.rules.categories.get(item_id, item.category)
+    t = plan.targets.get(item_id)
+    ideal = t.ideal if t is not None else 0
+    minimum = t.min if t is not None else 0
+    need_total = plan.need_totals.get(item_id, 0)
+
+    if t is not None and t.exact is not None:  # loadout weapon: whole copies
+        have, wanted = t.exact, ideal
+        floor = minimum
+        crafts = t.crafts_needed
+    else:
+        have = plan.owned.get(item_id, 0)
+        wanted = need_total + ideal
+        floor = need_total + minimum
+        crafts = math.ceil(max(0, wanted - have) / max(1, item.craft_quantity))
+
+    if wanted == 0:
+        return Verdict(
+            VerdictKind.NO_RULE,
+            "No target",
+            "No target for this item",
+            f"Own {have}",
+            category,
+        )
+
+    need = _top_need(plan, item_id) if need_total else None
+    if need is not None:
+        reason = _need_reason(need)
+    elif t is not None and _is_loadout(t):
+        reason = f"Loadout · {_copies(ideal)}"
+    else:
+        reason = plan.rules.notes.get(item_id) or "Reserve target"
+    counts = f"Own {have} · ideal {wanted}"
+    if item.craft_quantity > 1:
+        counts += f" · {TIMES}{item.craft_quantity} per craft"
+
+    if crafts == 0:
+        return Verdict(VerdictKind.KEEP, "Target met", reason, counts, category)
+    kind = VerdictKind.KEEP_LOW if have < floor else VerdictKind.KEEP_BUILDING
+    return Verdict(kind, f"Craft {crafts}", reason, counts, category)
 
 
 def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str]:

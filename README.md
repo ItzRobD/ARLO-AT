@@ -286,6 +286,16 @@ How it syncs:
 - **Made-from rows:** the ingredients still needed for the target. They're hidden once the target is met.
 - **⟳ age (top-right corner):** how long ago ARC Tracker last synced. It changes colour once the data is more than 3 hours old.
 
+### Crafting screen
+
+When a workshop station's **CRAFTING** tab is open, ARLO adds a popup beside the hovered blueprint's tooltip and another beside the selected blueprint's panel on the right:
+
+- **Craft N:** crafts still needed to reach your ideal target (ARC Tracker needs plus your `rules.yaml` or loadout ideal). Recipes that make several per craft are counted per craft.
+- **Target met:** you already have enough.
+- **No target:** nothing asks for this item.
+
+These popups need an ARC Tracker key. Counts come from ARC Tracker, so right after you craft they lag until its next sync.
+
 ### Contributing to a public fork
 
 Enable the bundled pre-commit hook once per clone:

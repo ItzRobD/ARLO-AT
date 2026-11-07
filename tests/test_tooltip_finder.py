@@ -4,6 +4,7 @@ import numpy as np
 
 from arc_helper.overlay import place_beside
 from arc_helper.tooltip_finder import find_tooltip
+from arc_helper.tooltip_finder import find_tooltips
 
 CREAM = (249, 238, 223)
 
@@ -81,3 +82,19 @@ def test_cream_outside_tooltip_columns_does_not_move_top():
     noisy[468:484, 1960:2100] = CREAM
     assert find_tooltip(noisy) == find_tooltip(clean)
     assert abs(find_tooltip(noisy)[1] - 492) <= 4
+
+
+def test_finds_two_panels_left_to_right():
+    # Crafting screen: hovered blueprint tooltip plus the selected panel
+    frame = _tooltip(_frame(), 2316, 220, 2936, 1000)
+    frame = _tooltip(frame, 1288, 296, 1792, 776)
+    found = find_tooltips(frame)
+    assert len(found) == 2
+    for got, want in zip(found, [(1288, 296, 1792), (2316, 220, 2936)], strict=True):
+        assert all(abs(g - w) <= 4 for g, w in zip(got[:3], want, strict=True))
+
+
+def test_find_tooltips_single_and_none():
+    assert find_tooltips(_frame()) == []
+    frame = _tooltip(_frame(), 1212, 636, 1716, 1116)
+    assert find_tooltips(frame) == [find_tooltip(frame)]

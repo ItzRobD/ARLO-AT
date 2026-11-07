@@ -475,3 +475,15 @@ def test_catalogue_json_parsed_once_at_startup(tmp_path, monkeypatch):
     _run(svc, clock, 3)
     assert parses == [1]
     assert svc.lookup("CANISTER") is not None
+
+
+def test_crafting_lookup_is_separate_from_stash_verdict(tmp_path):
+    svc = _service(tmp_path, FakeClient())
+    svc.step()
+    stash, _, _ = svc.lookup("Light Gun Parts")
+    craft, _, _ = svc.lookup("Light Gun Parts", crafting=True)
+    assert craft.title.startswith(("Craft", "Target met", "No target"))
+    assert stash.title != craft.title
+    # memoised per mode: asking again does not swap them
+    assert svc.lookup("Light Gun Parts")[0] is stash
+    assert svc.lookup("Light Gun Parts", crafting=True)[0] is craft

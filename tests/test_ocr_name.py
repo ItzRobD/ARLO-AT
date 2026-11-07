@@ -90,3 +90,13 @@ def test_tier_one_tooltip_reads_with_numeral():
     if CACHED_CATALOGUE.exists():
         data = json.loads(CACHED_CATALOGUE.read_text(encoding="utf-8"))
         assert Catalogue.from_api_json(data).resolve(name) == "tempest_i"
+
+
+def test_contains_crafting_word():
+    from arc_helper.ocr import OCREngine
+
+    hit = OCREngine._contains_word
+    assert hit("OS K K EXPLOSIVESSTATIONLEVEL CRAFTINGLEVELUP", "CRAFTING")
+    assert hit("WORKBENCH LEVEL CRAFTlNG", "CRAFTING")  # one OCR slip
+    assert not hit("INVENTORY INVENTORY LO", "CRAFTING")
+    assert not hit("", "CRAFTING")

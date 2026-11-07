@@ -40,6 +40,7 @@ from arc_helper.arctracker.snapshot import parse_progress
 from arc_helper.arctracker.snapshot import parse_tracking
 from arc_helper.arctracker.snapshot import save_snapshot
 from arc_helper.arctracker.verdict import Verdict
+from arc_helper.arctracker.verdict import craft_verdict_for
 from arc_helper.arctracker.verdict import unknown_verdict
 from arc_helper.arctracker.verdict import verdict_for
 
@@ -72,6 +73,7 @@ class _Live:
     plan: Plan
     # item id -> verdict; None marks a verdict_for that raised (logged once)
     verdicts: dict[str, Verdict | None] = field(default_factory=dict)
+    craft_verdicts: dict[str, Verdict | None] = field(default_factory=dict)
     resolved: dict[str, str | None] = field(default_factory=dict)
 
 
@@ -157,8 +159,13 @@ class AdvisorService:
 
     # -- scanner-thread API ------------------------------------------------
 
-    def lookup(self, ocr_name: str) -> tuple[Verdict, str, bool] | None:
+    def lookup(
+        self, ocr_name: str, *, crafting: bool = False
+    ) -> tuple[Verdict, str, bool] | None:
         """Verdict, age label and staleness; None without personal data.
+
+        ``crafting`` gives the crafting-screen verdict (crafts to the ideal
+        target) instead of the stash Keep/Sell/Recycle verdict.
 
         With personal data, a name the catalogue cannot resolve gets the
         Unknown verdict (never the generic database's fuzzy match).
@@ -179,10 +186,12 @@ class AdvisorService:
         if item_id is None:
             verdict = _UNKNOWN
         else:
-            verdict = live.verdicts.get(item_id, _MISSING)
+            memo = live.craft_verdicts if crafting else live.verdicts
+            decide = craft_verdict_for if crafting else verdict_for
+            verdict = memo.get(item_id, _MISSING)
             if verdict is _MISSING:
                 try:
-                    verdict = verdict_for(live.plan, item_id)
+                    verdict = decide(live.plan, item_id)
                 except Exception:
                     logger.exception(
                         "ARC Tracker verdict failed for %r; not retried until "
@@ -190,7 +199,7 @@ class AdvisorService:
                         ocr_name,
                     )
                     verdict = None
-                live.verdicts[item_id] = verdict
+                memo[item_id] = verdict
             if verdict is None:
                 return None
         snap = live.plan.snapshot
