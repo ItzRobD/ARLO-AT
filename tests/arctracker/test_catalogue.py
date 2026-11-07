@@ -138,3 +138,10 @@ def test_fetch_uses_fresh_cache_and_falls_back(tmp_path, raw):
     stale = fetch_catalogue(tmp_path, session=bad)
     assert stale is not None
     assert "canister" in stale.items
+
+
+def test_is_weapon_from_firearm_classification(cat):
+    assert cat.items["renegade_iv"].is_weapon is True
+    assert cat.items["anvil_i"].is_weapon is True
+    assert cat.items["light_gun_parts"].is_weapon is False  # weapons category only
+    assert cat.items["light_ammo"].is_weapon is False

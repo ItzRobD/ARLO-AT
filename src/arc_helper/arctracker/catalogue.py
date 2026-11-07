@@ -45,12 +45,17 @@ class CatalogueItem:
     upgrade_cost: dict[str, int]
     upgrades_to: str | None
     blueprint_locked: bool
+    is_weapon: bool = False  # classification Firearm.*
+
+
+def _classification(raw: dict[str, Any]) -> str:
+    cls = (raw.get("mechanics") or {}).get("classification") or {}
+    return cls.get("category") or ""
 
 
 def category_for(raw: dict[str, Any]) -> str:
     """Map a raw API item to one of our six verdict categories."""
-    cls = (raw.get("mechanics") or {}).get("classification") or {}
-    cat = cls.get("category") or ""
+    cat = _classification(raw)
     typ = raw.get("type")
     item_id = raw.get("id") or ""
     if (
@@ -104,6 +109,7 @@ def _parse_item(raw: dict[str, Any]) -> CatalogueItem:
         upgrade_cost=dict(upgrade_cost or {}),
         upgrades_to=raw.get("upgradesTo"),
         blueprint_locked=bool(raw.get("blueprintLocked")),
+        is_weapon=_classification(raw).startswith("Firearm."),
     )
 
 
