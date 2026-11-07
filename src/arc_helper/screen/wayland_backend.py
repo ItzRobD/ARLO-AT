@@ -46,6 +46,10 @@ from .portal import ScreenCastSession  # noqa: E402
 
 FIRST_FRAME_TIMEOUT_S = 10.0
 KEEPALIVE_MS = 500
+# Ask the compositor for at most this many frames a second. Uncapped, KWin
+# copies every frame at the monitor's refresh rate (~20 MB each at 3440x1440),
+# costing ~40% of a core; the scanner reads ten times a second at most.
+MAX_CAPTURE_FPS = 10
 
 
 class WaylandBackend:
@@ -96,6 +100,7 @@ class WaylandBackend:
             desc = (
                 f"pipewiresrc fd={self._session.pipewire_fd} "
                 f"path={self._session.node_id} keepalive-time={KEEPALIVE_MS} "
+                f"! video/x-raw,max-framerate={MAX_CAPTURE_FPS}/1 "
                 "! videoconvert ! video/x-raw,format=BGRx "
                 "! appsink name=sink emit-signals=true max-buffers=2 drop=true sync=false"
             )
