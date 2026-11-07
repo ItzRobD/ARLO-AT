@@ -18,8 +18,8 @@ from mcp.client.streamable_http import streamable_http_client
 
 logger = logging.getLogger(__name__)
 
-AUTH_STATUSES = frozenset({401, 403})
-MAX_PAGES = 10  # per paged tool; guards against a server that never stops paging
+MAX_PAGES = 6  # per paged tool; guards against a server that never stops paging
+MAX_CALLS = 10  # tool calls per refresh, paging included (5 are fixed)
 TIMEOUT_S = 30.0
 TOTAL_TIMEOUT_S = 120.0
 
@@ -54,38 +54,62 @@ def _find_own(exc: BaseException) -> ArcTrackerError | None:
     return None
 
 
+def _auth_status(responses: list[tuple[int, str]]) -> int | None:
+    """401 always means a bad key; 403 only when the server says the token is
+    invalid (any other 403 is treated as transient)."""
+    for status, www_auth in responses:
+        if status == 401 or (status == 403 and "invalid_token" in www_auth):
+            return status
+    return None
+
+
 class ArcTrackerClient:
-    def __init__(self, api_key: str, url: str):
+    def __init__(self, api_key: str, url: str, *, transport: Any = None):
         self._key = api_key
         self.url = url
+        self._transport = transport  # tests: an httpx2.MockTransport
 
     def __repr__(self) -> str:
         return f"ArcTrackerClient(url={self.url!r})"
 
     def fetch_raw(self) -> dict[str, Any]:
         """One MCP session; returns the raw tool results (see service.py)."""
-        statuses: list[int] = []
+        responses: list[tuple[int, str]] = []
         try:
-            return asyncio.run(self._fetch(statuses))
+            return asyncio.run(self._fetch(responses))
         except Exception as exc:  # noqa: BLE001 - every failure becomes ArcTrackerError
-            auth = next((s for s in statuses if s in AUTH_STATUSES), None)
-            if auth is not None:
-                msg = f"ARC Tracker rejected the API key (HTTP {auth})"
-                raise ArcTrackerAuthError(msg) from None
-            own = _find_own(exc)
-            if own is not None:
-                raise type(own)(redact(str(own), self._key)) from None
-            msg = redact(f"ARC Tracker request failed: {_describe(exc)}", self._key)
-            raise ArcTrackerError(msg) from None
+            error_cls, msg = self._classify(exc, responses)
+        # Raised outside the except block so the original exception (which may
+        # quote the key) is neither the __cause__ nor the __context__.
+        raise error_cls(msg)
 
-    async def _fetch(self, statuses: list[int]) -> dict[str, Any]:
+    def _classify(
+        self, exc: Exception, responses: list[tuple[int, str]]
+    ) -> tuple[type[ArcTrackerError], str]:
+        auth = _auth_status(responses)
+        if auth is not None:
+            return (
+                ArcTrackerAuthError,
+                f"ARC Tracker rejected the API key (HTTP {auth})",
+            )
+        own = _find_own(exc)
+        if own is not None:
+            return type(own), redact(str(own), self._key)
+        failed = [s for s, _ in responses if s >= 400]
+        http = f" (HTTP {failed[0]})" if failed else ""
+        text = f"ARC Tracker request failed{http}: {_describe(exc)}"
+        return ArcTrackerError, redact(text, self._key)
+
+    async def _fetch(self, responses: list[tuple[int, str]]) -> dict[str, Any]:
         async def on_response(response: httpx2.Response) -> None:  # noqa: RUF029 - httpx2 async hook
-            statuses.append(response.status_code)
+            www_auth = response.headers.get("www-authenticate", "")
+            responses.append((response.status_code, www_auth))
 
         http = httpx2.AsyncClient(
             headers={"Authorization": f"Bearer {self._key}"},
             timeout=httpx2.Timeout(TIMEOUT_S),
             event_hooks={"response": [on_response]},
+            transport=self._transport,
         )
         with anyio.fail_after(TOTAL_TIMEOUT_S):
             async with (
@@ -97,7 +121,21 @@ class ArcTrackerClient:
                 return await _collect(session)
 
 
-async def _call(session: ClientSession, tool: str, args: dict[str, Any]) -> dict:
+class _Budget:
+    def __init__(self, calls: int):
+        self.left = calls
+
+    def spend(self, tool: str) -> None:
+        if self.left <= 0:
+            msg = (
+                f"more than {MAX_CALLS} tool calls needed (at {tool}); refresh aborted"
+            )
+            raise ArcTrackerError(msg)
+        self.left -= 1
+
+
+async def _call(session: Any, budget: _Budget, tool: str, args: dict[str, Any]) -> dict:
+    budget.spend(tool)
     result = await session.call_tool(tool, args)
     content = getattr(result, "content", None) or []
     text = getattr(content[0], "text", None) if content else None
@@ -118,50 +156,50 @@ async def _call(session: ClientSession, tool: str, args: dict[str, Any]) -> dict
     return data
 
 
-def _more_offset(page: dict) -> int | None:
-    more = page.get("more")
-    off = more.get("nextOffset") if isinstance(more, dict) else None
-    return off if isinstance(off, int) else None
-
-
-async def _collect(session: ClientSession) -> dict[str, Any]:
-    inventory: list[dict] = []
-    offset = 0
-    for _ in range(MAX_PAGES):
-        page = await _call(
-            session, "get_my_inventory", {"limit": 100, "offset": offset}
-        )
-        inventory.append(page)
+def _next_offset(tool: str, page: dict, offset: int) -> int | None:
+    """Offset of the next page, None on the last page. A page that says there
+    is more without a usable offset is an error, never silently partial data."""
+    if tool == "get_my_inventory":
+        if not page.get("truncated"):
+            return None
         nxt = page.get("nextOffset")
-        if not page.get("truncated") or not isinstance(nxt, int) or nxt <= offset:
-            break
-        offset = nxt
+    else:
+        more = page.get("more")
+        if more is None:
+            return None
+        nxt = more.get("nextOffset") if isinstance(more, dict) else None
+    if isinstance(nxt, bool) or not isinstance(nxt, int) or nxt <= offset:
+        msg = f"{tool}: more data at offset {offset} but no usable nextOffset ({nxt!r})"
+        raise ArcTrackerError(msg)
+    return nxt
 
-    needs: list[dict] = []
+
+async def _pages(
+    session: Any, budget: _Budget, tool: str, args: dict[str, Any]
+) -> list[dict]:
+    pages: list[dict] = []
     offset = 0
     for _ in range(MAX_PAGES):
-        page = await _call(session, "get_my_needs", {"limit": 30, "offset": offset})
-        needs.append(page)
-        nxt = _more_offset(page)
-        if nxt is None or nxt <= offset:
-            break
+        page = await _call(session, budget, tool, {**args, "offset": offset})
+        pages.append(page)
+        nxt = _next_offset(tool, page, offset)
+        if nxt is None:
+            return pages
         offset = nxt
+    msg = f"{tool}: still more data after {MAX_PAGES} pages"
+    raise ArcTrackerError(msg)
 
-    tracking = await _call(session, "get_my_tracking", {"limit": 50})
-    entries = list(tracking.get("entries") or [])
-    offset = 0
-    for _ in range(MAX_PAGES - 1):
-        nxt = _more_offset(tracking)
-        if nxt is None or nxt <= offset:
-            break
-        offset = nxt
-        tracking = await _call(
-            session, "get_my_tracking", {"limit": 50, "offset": offset}
-        )
-        entries.extend(tracking.get("entries") or [])
 
-    blueprints = await _call(session, "get_my_progress", {"section": "blueprints"})
-    workshop = await _call(session, "get_my_progress", {"section": "workshop"})
+async def _collect(session: Any) -> dict[str, Any]:
+    budget = _Budget(MAX_CALLS)
+    inventory = await _pages(session, budget, "get_my_inventory", {"limit": 100})
+    needs = await _pages(session, budget, "get_my_needs", {"limit": 30})
+    tracking = await _pages(session, budget, "get_my_tracking", {"limit": 50})
+    entries = [e for page in tracking for e in page.get("entries") or []]
+    blueprints = await _call(
+        session, budget, "get_my_progress", {"section": "blueprints"}
+    )
+    workshop = await _call(session, budget, "get_my_progress", {"section": "workshop"})
     return {
         "inventory": inventory,
         "needs": needs,

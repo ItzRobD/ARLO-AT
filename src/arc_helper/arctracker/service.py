@@ -52,6 +52,8 @@ CATALOGUE_REFRESH_S = 86400
 CATALOGUE_RETRY_S = 3600
 TICK_S = 1.0
 RESOLVE_MEMO_MAX = 4096
+CATALOGUE_ERROR_RETRY_S = 300
+_MISSING: Any = object()
 NO_KEY_MSG = "ARC Tracker: no API key; using generic item database"
 
 
@@ -133,9 +135,8 @@ class AdvisorService:
         if live is None:
             return None
         try:
-            if ocr_name in live.resolved:
-                item_id = live.resolved[ocr_name]
-            else:
+            item_id = live.resolved.get(ocr_name, _MISSING)
+            if item_id is _MISSING:
                 item_id = live.plan.catalogue.resolve(ocr_name)
                 if len(live.resolved) >= RESOLVE_MEMO_MAX:
                     live.resolved.clear()
@@ -155,14 +156,17 @@ class AdvisorService:
         return verdict, label, stale
 
     def request_refresh(self) -> None:
-        """Ask for fresh personal data. Ignored within 60 s of the last fetch."""
+        """Ask for fresh personal data. Ignored within 60 s of the last fetch
+        and while backing off after a failure."""
         with self._lock:
             if not self._has_key or self._auth_failed:
                 return
             now = self._clock()
             last = self._last_fetch
             if last is not None and now - last < REQUEST_THROTTLE_S:
-                return  # data is under a minute old (or a retry is pending)
+                return  # data is under a minute old
+            if self._failures:
+                return  # in backoff: a request never brings the retry forward
             self._next_fetch = min(self._next_fetch, now)
         self._wake.set()
 
@@ -223,7 +227,18 @@ class AdvisorService:
         self._rebuild()
 
     def _refresh_catalogue(self, now: float) -> None:
-        cat = self._catalogue_loader(self._cache_dir)
+        # Scheduled first, so a loader that raises is retried at most every 300 s.
+        self._next_catalogue = now + CATALOGUE_ERROR_RETRY_S
+        try:
+            cat = self._catalogue_loader(self._cache_dir)
+        except Exception as exc:  # noqa: BLE001 - never let the catalogue stall the loop
+            logger.warning(
+                "ARC Tracker catalogue load failed, retry in %ss: %s: %s",
+                CATALOGUE_ERROR_RETRY_S,
+                type(exc).__name__,
+                exc,
+            )
+            return
         if cat is None:
             self._next_catalogue = now + CATALOGUE_RETRY_S
             return

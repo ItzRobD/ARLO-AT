@@ -50,6 +50,7 @@ source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "evdev", marker = "sys_platform == 'linux'" },
+    { name = "httpx2" },
     { name = "mcp" },
     { name = "mss" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -80,6 +81,7 @@ wayland = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
     { name = "evdev", marker = "sys_platform == 'linux'", specifier = ">=1.6" },
+    { name = "httpx2", specifier = ">=2.16" },
     { name = "mcp", specifier = ">=2.3" },
     { name = "mss", specifier = ">=9.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },

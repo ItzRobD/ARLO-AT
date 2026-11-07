@@ -294,3 +294,61 @@ def test_start_stop(tmp_path):
     svc.stop()
     assert client.calls == 1
     assert svc.lookup("CANISTER") is not None
+
+
+def _fetch_times(svc, client, clock, seconds, every=None, start=0):
+    times = []
+    for i in range(seconds):
+        if every and i >= start and (i - start) % every == 0:
+            svc.request_refresh()
+        before = client.calls
+        svc.step()
+        if client.calls != before:
+            times.append(clock.t - T0)
+        clock.t += 1
+    return times
+
+
+def test_request_refresh_does_not_shorten_backoff(tmp_path):  # Review Focus 3
+    clock = Clock()
+    client = FakeClient(script=[None], default=ArcTrackerError("down"))
+    svc = _service(tmp_path, client, clock)
+    # outage starts at t=300; open the inventory every 61 s from then on
+    times = _fetch_times(svc, client, clock, 1200, every=61, start=301)
+    assert times[:6] == [0, 300, 360, 480, 780, 1080]
+
+
+def test_request_refresh_works_again_after_recovery(tmp_path):
+    clock = Clock()
+    client = FakeClient(script=[None, ArcTrackerError("blip")])
+    svc = _service(tmp_path, client, clock)
+    _run(svc, clock, 361)  # ok at 0, fail at 300, ok at 360
+    assert client.calls == 3
+    _run(svc, clock, 60)
+    svc.request_refresh()
+    _run(svc, clock, 1)
+    assert client.calls == 4
+
+
+def test_raising_catalogue_loader_is_throttled_and_fetch_still_runs(tmp_path, caplog):
+    loads = []
+
+    def loader(cache_dir, **_kw):
+        loads.append(cache_dir)
+        msg = "unexpected payload"
+        raise TypeError(msg)
+
+    _write_catalogue_cache(tmp_path)
+    clock = Clock()
+    client = FakeClient()
+    svc = AdvisorService(
+        _settings(tmp_path), client=client, clock=clock, catalogue_loader=loader
+    )
+    with caplog.at_level(logging.WARNING):
+        _run(svc, clock, 600)
+    assert len(loads) == 2  # t=0 and t=300
+    assert client.calls == 2  # t=0 and t=300 personal refreshes still ran
+    assert svc.lookup("CANISTER") is not None  # cached catalogue kept
+    failures = [r for r in caplog.records if "catalogue load failed" in r.getMessage()]
+    assert len(failures) == 2
+    assert all(r.exc_info is None for r in failures)
