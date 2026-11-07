@@ -2,6 +2,8 @@
 import sys
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
 
 # Find Python DLL
@@ -12,7 +14,7 @@ if python_dll.exists():
 
 a = Analysis(
     ['src/arc_helper/main.py'],
-    pathex=[],
+    pathex=['src'],
     binaries=binaries,
     datas=[],
     hiddenimports=[
@@ -23,6 +25,14 @@ a = Analysis(
         'requests',
         'bs4',
         'beautifulsoup4',
+        'yaml',
+        'anyio',
+        'httpx',
+        'mss',
+        'pynput',
+        *collect_submodules('arc_helper'),
+        *collect_submodules('mcp'),
+        *collect_submodules('pynput'),
     ],
     hookspath=[],
     hooksconfig={},
