@@ -290,11 +290,17 @@ How it syncs:
 
 When a workshop station's **CRAFTING** tab is open, ARLO adds a popup beside the hovered blueprint's tooltip and another beside the selected blueprint's panel on the right:
 
-- **Craft N:** crafts still needed to reach your ideal target (ARC Tracker needs plus your `rules.yaml` or loadout ideal). Recipes that make several per craft are counted per craft.
+- **Craft N:** crafts still needed to reach your ideal target: ARC Tracker needs, plus your `rules.yaml` or loadout ideal, plus what your other unmet targets still need of this item as an ingredient (listed in rows on the popup). Recipes that make several per craft are counted per craft.
 - **Target met:** you already have enough.
 - **No target:** nothing asks for this item.
 
 These popups need an ARC Tracker key. Counts come from ARC Tracker, so right after you craft they lag until its next sync.
+
+**BP status unknown** on a popup means ARC Tracker's list of learned blueprints was cut off before reaching this item, so ARLO can't tell whether you've learned it. Its API returns at most 30 names.
+
+### Connection icon
+
+With an ARC Tracker key set, a wifi icon sits beside the status text in the top-left window: green when the last sync worked, grey while connecting, red when offline or the key was rejected (popups then use the last saved data). Without a key the icon is hidden.
 
 ### Contributing to a public fork
 

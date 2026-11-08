@@ -68,6 +68,12 @@ TEXT_COUNTS = "#c8c8dc"
 TEXT_ROW = "#e6e6f0"
 NO_DATA_AGE = "\u27f3 \u2014"  # "⟳ —": no personal data
 VERDICT_WIDTH = 260  # popup width at scale 1
+WIFI_ICON_SIZE = 14  # status window icon at scale 1
+CONNECTION_COLORS = {
+    "online": "#32CD32",
+    "connecting": "#888888",
+    "offline": "#FF4444",
+}
 
 # Gap between the game's tooltip and our popup, in physical pixels.
 ANCHOR_GAP = 16
@@ -723,10 +729,51 @@ class StatusWindow:
             fg="#888888",
             bg=BG_DARK,
         )
-        self.status_label.pack()
+        self.status_label.pack(side="left")
+
+        # Drawn rather than an emoji glyph: Tk's emoji support varies by platform
+        size = self._scale(WIFI_ICON_SIZE)
+        self.connection_icon = tk.Canvas(
+            self.frame, width=size, height=size, bg=BG_DARK, highlightthickness=0
+        )
+        self._draw_wifi_icon(size)
+
         if self.on_quit:
             self.status_label.bind("<Button-3>", lambda e: self.on_quit())
             self.frame.bind("<Button-3>", lambda e: self.on_quit())
+            self.connection_icon.bind("<Button-3>", lambda e: self.on_quit())
+
+    def _draw_wifi_icon(self, size: int) -> None:
+        """Three arcs over a dot, centred at the bottom of the canvas."""
+        cx, cy = size / 2, size * 0.85
+        width = max(1, round(size / 9))
+        for frac in (0.3, 0.55, 0.8):
+            r = size * frac
+            self.connection_icon.create_arc(
+                cx - r,
+                cy - r,
+                cx + r,
+                cy + r,
+                start=45,
+                extent=90,
+                style="arc",
+                width=width,
+                tags="wifi",
+            )
+        dot = max(1.0, size * 0.09)
+        self.connection_icon.create_oval(
+            cx - dot, cy - dot, cx + dot, cy + dot, width=0, tags="wifi_dot"
+        )
+
+    def set_connection(self, state: str) -> None:
+        """Show the ARC Tracker link: hidden when no API key is set."""
+        color = CONNECTION_COLORS.get(state)
+        if color is None:
+            self.connection_icon.pack_forget()
+            return
+        self.connection_icon.itemconfigure("wifi", outline=color)
+        self.connection_icon.itemconfigure("wifi_dot", fill=color)
+        self.connection_icon.pack(side="left", padx=(self._scale(8), 0))
 
     def set_scanning(self) -> None:
         self.status_label.config(text="\u25cf Scanning...", fg="#888888")

@@ -487,3 +487,44 @@ def test_crafting_lookup_is_separate_from_stash_verdict(tmp_path):
     # memoised per mode: asking again does not swap them
     assert svc.lookup("Light Gun Parts")[0] is stash
     assert svc.lookup("Light Gun Parts", crafting=True)[0] is craft
+
+
+def test_connection_states(tmp_path):
+    clock = Clock()
+    err = ArcTrackerError("boom")
+    client = FakeClient(script=[None], default=err)
+    svc = _service(tmp_path, client, clock)
+    assert svc.connection() == "connecting"
+    svc.step()
+    assert svc.connection() == "online"
+    _run(svc, clock, 2000)  # next refresh fails
+    assert svc.connection() == "offline"
+
+
+def test_connection_off_without_key(tmp_path):
+    svc = _service(tmp_path, FakeClient(), key=None)
+    assert svc.connection() == "off"
+
+
+def test_connection_rejected_key_is_offline(tmp_path):
+    client = FakeClient(default=ArcTrackerAuthError("unauthorized"))
+    svc = _service(tmp_path, client)
+    svc.step()
+    assert svc.connection() == "offline"
+
+
+def test_cached_snapshot_alone_is_not_online(tmp_path):
+    snap = PlayerSnapshot(
+        synced_at=datetime.fromtimestamp(T0, UTC),
+        fetched_at=datetime.fromtimestamp(T0, UTC),
+        owned={},
+        needs=(),
+        keep_amounts={},
+        learned_blueprints=frozenset(),
+        blueprints_complete=True,
+        bench_levels={},
+    )
+    (tmp_path / "cache").mkdir()
+    save_snapshot(snap, tmp_path / "cache" / "snapshot.json")
+    svc = _service(tmp_path, FakeClient())
+    assert svc.connection() == "connecting"

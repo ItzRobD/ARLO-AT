@@ -129,6 +129,7 @@ class AdvisorService:
         self._failures = 0
         self._auth_failed = False
         self._last_error: str | None = None
+        self._fetched_ok = False  # this session, not just a cached snapshot
         self._next_catalogue = 0.0
         self._calls: deque[tuple[float, int]] = deque()  # (start, tool calls)
         self._no_key_logged = False
@@ -248,6 +249,14 @@ class AdvisorService:
         state = "offline, cached" if self._last_error else "synced"
         return f"ARC Tracker: {state} {label}" + (" (stale)" if stale else "")
 
+    def connection(self) -> str:
+        """ARC Tracker link state: off (no key), connecting, online or offline."""
+        if not self._has_key:
+            return "off"
+        if self._auth_failed or self._last_error is not None:
+            return "offline"
+        return "online" if self._fetched_ok else "connecting"
+
     # -- service thread ----------------------------------------------------
 
     def start(self) -> None:
@@ -358,6 +367,7 @@ class AdvisorService:
             self._last_fetch = now
             self._next_fetch = now + REFRESH_S
         self._last_error = None
+        self._fetched_ok = True
         self._snapshot = snapshot
         try:
             save_snapshot(snapshot, self._snapshot_path)

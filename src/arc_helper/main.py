@@ -41,6 +41,8 @@ from arc_helper.screen import ScreenCaptureUnavailable
 
 load_dotenv(Path(__file__).with_name(".env"), override=False)
 
+CONNECTION_POLL_MS = 2000
+
 
 class ScannerState(Enum):
     """State machine for the scanner."""
@@ -495,6 +497,11 @@ class Application:
         elif status == "error":
             self.status.set_error("Error")
 
+    def _poll_connection(self) -> None:
+        """Keep the status window's ARC Tracker icon current."""
+        self.status.set_connection(self.advisor.connection())
+        self.root.after(CONNECTION_POLL_MS, self._poll_connection)
+
     def _pump_ui_queue(self) -> None:
         """Drain scanner UI messages on the main thread, then reschedule."""
         try:
@@ -590,6 +597,7 @@ class Application:
 
         # Start the main-thread UI pump (must be scheduled from the main thread)
         self._pump_ui_queue()
+        self._poll_connection()
 
         # Run Tk mainloop
         try:

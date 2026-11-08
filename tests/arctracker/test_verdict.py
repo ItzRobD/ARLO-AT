@@ -562,7 +562,7 @@ def test_hint_blueprint_not_learned(plan):
     assert verdict_for(p, "light_gun_parts").hint == "Blueprint not learned"
 
 
-def test_hint_hidden_when_blueprint_unknown(plan):
+def test_hint_marks_unknown_blueprint_status(plan):
     p = plan(
         owned={"light_gun_parts": 21, "simple_gun_parts": 24},
         rules=LIGHT,
@@ -570,8 +570,21 @@ def test_hint_hidden_when_blueprint_unknown(plan):
         complete=False,
     )
     v = verdict_for(p, "light_gun_parts")
-    assert v.hint is None
+    assert v.hint == "Craft 6 now → 27 / 50 (BP status unknown)"
+    assert v.hint_state is None  # dim: it may not be craftable at all
     assert v.made_from != ()
+
+
+def test_farm_hint_marks_unknown_blueprint_status(plan):
+    p = plan(
+        owned={"light_gun_parts": 21},
+        rules=LIGHT,
+        benches={"refiner": 3},
+        complete=False,
+    )
+    v = verdict_for(p, "light_gun_parts")
+    assert v.hint == "Farm Simple Gun Parts (BP status unknown)"
+    assert v.hint_state is None
 
 
 def test_hint_hidden_without_progress_data(plan):
