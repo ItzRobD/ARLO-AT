@@ -31,6 +31,8 @@ MAX_CRAFT_ROWS = 3
 TIMES = "\N{MULTIPLICATION SIGN}"  # the popup copy uses U+00D7
 IN_RAID = "in_raid"  # a craftBench entry that is no workshop module
 ON_DEMAND = "Loadout · craft on demand"  # owned item of a copies: 0 group
+BP_UNKNOWN = "BP status unknown"  # ARC Tracker's learned list was cut off
+BP_MISSING = "Blueprint not learned"
 CONSUME_REASON = "Research · hand in"
 
 NEED_KINDS = {
@@ -182,6 +184,16 @@ def _spare_for(plan: Plan, ingredient: str, target_id: str) -> int:
     )
 
 
+def _blueprint_note(plan: Plan, item: CatalogueItem) -> str | None:
+    """What to say about a locked item missing from the learned list, if any."""
+    snap = plan.snapshot
+    if snap is None or not (snap.bench_levels or snap.learned_blueprints):
+        return None  # no progress data
+    if not item.blueprint_locked or item.id in snap.learned_blueprints:
+        return None
+    return BP_MISSING if snap.blueprints_complete else BP_UNKNOWN
+
+
 def _hint(
     plan: Plan,
     item: CatalogueItem,
@@ -200,16 +212,19 @@ def _hint(
         if known and all(snap.bench_levels[b] < item.station_level for b in known):
             bench = BENCH_NAMES.get(known[0], known[0])
             return f"Needs {bench} {item.station_level}", None
-    if item.blueprint_locked and item.id not in snap.learned_blueprints:
-        if snap.blueprints_complete:
-            return "Blueprint not learned", None
-        return None, None
+    note = _blueprint_note(plan, item)
+    if note == BP_MISSING:
+        return note, None
     if craft_now > 0:
         have = t.exact if t.exact is not None else t.held
         state = "covers" if craft_now >= t.crafts_needed else "partial"
         made = have + craft_now * t.craft_quantity
-        return f"Craft {craft_now} now → {made} / {t.ideal}", state
-    return f"Farm {_name(plan, scarcest)}", "none"
+        text = f"Craft {craft_now} now → {made} / {t.ideal}"
+    else:
+        text, state = f"Farm {_name(plan, scarcest)}", "none"
+    if note == BP_UNKNOWN:
+        return f"{text} ({note})", None  # dim: it may not be craftable at all
+    return text, state
 
 
 def _cover_state(crafts: int, shortfall: int) -> str:
@@ -292,8 +307,9 @@ def verdict_for(plan: Plan, item_id: str) -> Verdict:
 def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
     """Crafting-screen verdict: crafts still needed to reach the ideal target.
 
-    The target is every ARC Tracker need for the item plus its rules.yaml /
-    loadout ideal (needs are served first, so the two add up). Crafts are
+    The target is every ARC Tracker need for the item, plus its rules.yaml /
+    loadout ideal, plus what other unmet targets still need of it as an
+    ingredient, so crafting those does not eat into the reserve. Crafts are
     counted per craft, so a recipe yielding several units counts once.
     """
     item = plan.catalogue.items.get(item_id)
@@ -304,6 +320,8 @@ def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
     ideal = t.ideal if t is not None else 0
     minimum = t.min if t is not None else 0
     need_total = plan.need_totals.get(item_id, 0)
+    unmet = {k: v for k, v in _unmet_demand(plan, item_id).items() if k != item_id}
+    reserved = sum(unmet.values())
 
     if t is not None and t.exact is not None:  # loadout weapon: whole copies
         have, wanted = t.exact, ideal
@@ -311,8 +329,9 @@ def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
         crafts = t.crafts_needed
     else:
         have = plan.owned.get(item_id, 0)
-        wanted = need_total + ideal
-        floor = need_total + minimum
+        wanted = need_total + ideal + reserved
+        urgent = sum(v for k, v in unmet.items() if plan.targets[k].state == "low")
+        floor = need_total + minimum + urgent
         crafts = math.ceil(max(0, wanted - have) / max(1, item.craft_quantity))
 
     if wanted == 0:
@@ -330,15 +349,27 @@ def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
     elif t is not None and _is_loadout(t):
         reason = f"Loadout · {_copies(ideal)}"
     else:
-        reason = plan.rules.notes.get(item_id) or "Reserve target"
+        default = "Reserve target" if ideal else "Crafting ingredient"
+        reason = plan.rules.notes.get(item_id) or default
     counts = f"Own {have} · ideal {wanted}"
     if item.craft_quantity > 1:
         counts += f" · {TIMES}{item.craft_quantity} per craft"
 
+    rows = _crafts(plan, item_id)
     if crafts == 0:
-        return Verdict(VerdictKind.KEEP, "Target met", reason, counts, category)
+        return Verdict(
+            VerdictKind.KEEP, "Target met", reason, counts, category, crafts=rows
+        )
     kind = VerdictKind.KEEP_LOW if have < floor else VerdictKind.KEEP_BUILDING
-    return Verdict(kind, f"Craft {crafts}", reason, counts, category)
+    return Verdict(
+        kind,
+        f"Craft {crafts}",
+        reason,
+        counts,
+        category,
+        crafts=rows,
+        hint=_blueprint_note(plan, item),
+    )
 
 
 def _decide(plan: Plan, item: CatalogueItem) -> tuple[VerdictKind, str, str, str]:

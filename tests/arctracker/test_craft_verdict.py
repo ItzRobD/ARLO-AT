@@ -1,9 +1,12 @@
+# ruff: noqa: RUF001 - expected popup copy uses the multiplication sign
 """Crafting-screen verdict: crafts still needed to reach the ideal target."""
 
 import pytest
 
+from arc_helper.arctracker.verdict import CraftRow
 from arc_helper.arctracker.verdict import VerdictKind
 from arc_helper.arctracker.verdict import craft_verdict_for
+from arc_helper.arctracker.verdict import verdict_for
 
 from .test_verdict import plan  # noqa: F401 - pytest fixture
 
@@ -101,3 +104,93 @@ def test_unknown_item(plan):  # noqa: F811
 def test_without_snapshot(plan, item_id):  # noqa: F811
     v = craft_verdict_for(plan(snapshot=False), item_id)
     assert v.title == "No target"
+
+
+# --- Ingredients other targets still need, same as the stash ----------------
+
+LIGHT_SHORT = "light_gun_parts: {target: 50, tier: 4}"
+
+
+def test_counts_what_other_targets_still_need(plan):  # noqa: F811
+    # 2 Light Gun Parts short -> 8 Simple Gun Parts, on top of the reserve of 20
+    p = plan(
+        owned={"light_gun_parts": 48, "simple_gun_parts": 21},
+        rules=LIGHT_SHORT + "\nsimple_gun_parts: {target: 20}",
+    )
+    v = craft_verdict_for(p, "simple_gun_parts")
+    assert v.title == "Craft 7"
+    assert v.counts == "Own 21 · ideal 28"
+    assert v.crafts == (CraftRow("Light Gun Parts ×2", "8", "low"),)
+
+
+def test_low_matches_the_stash_when_reserve_is_claimed(plan):  # noqa: F811
+    p = plan(
+        owned={"light_gun_parts": 48, "simple_gun_parts": 21},
+        rules=LIGHT_SHORT + "\nsimple_gun_parts: {target: 20}",
+    )
+    assert craft_verdict_for(p, "simple_gun_parts").kind is K.KEEP_LOW
+    assert verdict_for(p, "simple_gun_parts").kind is K.KEEP_LOW
+
+
+def test_ingredient_without_its_own_target(plan):  # noqa: F811
+    p = plan(owned={"light_gun_parts": 48, "simple_gun_parts": 3}, rules=LIGHT_SHORT)
+    v = craft_verdict_for(p, "simple_gun_parts")
+    assert (v.title, v.reason) == ("Craft 5", "Crafting ingredient")
+
+
+def test_ingredient_of_a_building_target_is_not_low(plan):  # noqa: F811
+    p = plan(
+        owned={"light_gun_parts": 20, "simple_gun_parts": 3},
+        rules="light_gun_parts: {min: 15, ideal: 21}",
+    )
+    assert craft_verdict_for(p, "simple_gun_parts").kind is K.KEEP_BUILDING
+
+
+def test_ingredient_already_covered(plan):  # noqa: F811
+    p = plan(owned={"light_gun_parts": 48, "simple_gun_parts": 8}, rules=LIGHT_SHORT)
+    assert craft_verdict_for(p, "simple_gun_parts").title == "Target met"
+
+
+def test_met_target_reserves_nothing(plan):  # noqa: F811
+    p = plan(
+        owned={"light_gun_parts": 50, "simple_gun_parts": 21},
+        rules=LIGHT_SHORT + "\nsimple_gun_parts: {target: 20}",
+    )
+    v = craft_verdict_for(p, "simple_gun_parts")
+    assert (v.title, v.crafts) == ("Target met", ())
+
+
+def test_item_claimed_by_nothing_stays_no_target(plan):  # noqa: F811
+    p = plan(owned={"light_gun_parts": 50, "simple_gun_parts": 21}, rules=LIGHT_SHORT)
+    assert craft_verdict_for(p, "simple_gun_parts").title == "No target"
+
+
+# --- Blueprint status -------------------------------------------------------
+
+SHORT = {"owned": {"light_gun_parts": 21}, "rules": LIGHT_SHORT}
+
+
+def test_blueprint_status_unknown_when_list_is_cut_off(plan):  # noqa: F811
+    p = plan(benches={"refiner": 3}, complete=False, **SHORT)
+    v = craft_verdict_for(p, "light_gun_parts")
+    assert (v.title, v.hint) == ("Craft 29", "BP status unknown")
+
+
+def test_blueprint_learned_has_no_marker(plan):  # noqa: F811
+    p = plan(learned={"light_gun_parts"}, complete=False, **SHORT)
+    assert craft_verdict_for(p, "light_gun_parts").hint is None
+
+
+def test_blueprint_not_learned_when_list_is_complete(plan):  # noqa: F811
+    p = plan(benches={"refiner": 3}, **SHORT)
+    assert craft_verdict_for(p, "light_gun_parts").hint == "Blueprint not learned"
+
+
+def test_no_blueprint_marker_when_nothing_to_craft(plan):  # noqa: F811
+    p = plan(
+        owned={"light_gun_parts": 50},
+        rules=LIGHT_SHORT,
+        benches={"refiner": 3},
+        complete=False,
+    )
+    assert craft_verdict_for(p, "light_gun_parts").hint is None
