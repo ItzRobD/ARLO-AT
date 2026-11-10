@@ -539,7 +539,10 @@ class OCREngine:
             max(0, left - pad) : min(width, right + pad),
         ]
         # Same tooltip as last time (position and pixels): reuse the name
-        key = (bbox, hashlib.blake2b(region[::4, ::4].tobytes(), digest_size=16).digest())
+        key = (
+            bbox,
+            hashlib.blake2b(region[::4, ::4].tobytes(), digest_size=16).digest(),
+        )
         if key == self._cache_key:
             return self._cache_name
 
@@ -562,14 +565,16 @@ class OCREngine:
             logger.debug(f"Extracted item name: '{item_name}'")
         return item_name
 
-    CRAFTING_WORD = "CRAFTING"
-    # Station header strip (left half, top 5%): "<STATION> - LEVEL n
-    # CRAFTING LEVEL UP". The station name's length moves the word, so the
-    # whole strip is read rather than a fixed trigger box.
+    # Header words of screens with to-target popups: a workshop station's
+    # "<STATION> - LEVEL n  CRAFTING  LEVEL UP" and a trader's
+    # "<TRADER>  <CATEGORY>  TRADES  QUESTS".
+    SCREEN_WORDS = ("CRAFTING", "TRADES")
+    # Header strip (left half, top 5%). Names of different lengths move the
+    # words, so the whole strip is read rather than a fixed trigger box.
     HEADER_STRIP = (0.0, 0.0, 0.5, 0.05)
 
-    def check_crafting(self) -> bool:
-        """True while a workshop station's CRAFTING header is on screen."""
+    def check_screen(self) -> str | None:
+        """The header word of a crafting or trader screen on show, else None."""
         width, height = get_screen_resolution()
         fx0, fy0, fx1, fy1 = self.HEADER_STRIP
         bbox = (
@@ -582,8 +587,13 @@ class OCREngine:
         try:
             text = self.ocr_text(image, psm=PSM_SINGLE_LINE, upper=True)
         except pytesseract.TesseractError:
-            return False
-        return self._contains_word(text, self.CRAFTING_WORD)
+            return None
+        return self.screen_word(text)
+
+    @classmethod
+    def screen_word(cls, text: str) -> str | None:
+        """The first of SCREEN_WORDS found in header OCR text."""
+        return next((w for w in cls.SCREEN_WORDS if cls._contains_word(text, w)), None)
 
     @staticmethod
     def _contains_word(text: str, word: str, threshold: float = 0.85) -> bool:
@@ -618,9 +628,7 @@ class OCREngine:
         prev, self._prev_panels = self._prev_panels, panels
         found: list[tuple[str, tuple[int, int, int, int]]] = []
         for bbox in panels:
-            if not any(
-                _bbox_close(bbox, p, self.ACCEPTED_TOLERANCE_PX) for p in prev
-            ):
+            if not any(_bbox_close(bbox, p, self.ACCEPTED_TOLERANCE_PX) for p in prev):
                 continue  # new or still animating in
             left, top, right, bottom = bbox
             pad = 8
@@ -723,9 +731,7 @@ class OCREngine:
 
         whitelisted = self.ocr_text(processed, upper=True)
         name_lines = [ln.strip() for ln in whitelisted.split("\n") if ln.strip()]
-        name = self._clean_text(
-            " ".join(self._matching_lines(name_lines, plain_names))
-        )
+        name = self._clean_text(" ".join(self._matching_lines(name_lines, plain_names)))
         return self._clean_text(self._merge_numeral(plain_names[-1], name)) or None
 
     @staticmethod

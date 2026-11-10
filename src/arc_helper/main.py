@@ -165,7 +165,7 @@ class Scanner:
     # Hotkey override (Ctrl+Shift to force tooltip scanning)
     _hotkey_override: bool = False
     # Active because a workshop station's CRAFTING tab is open (not INVENTORY)
-    _crafting: bool = False
+    _screen: str | None = None  # header word of a crafting / trader screen
 
     # Thread control
     _running: bool = False
@@ -232,19 +232,19 @@ class Scanner:
                     ):
                         # Trigger detected! Switch to active mode
                         self._hotkey_override = False
-                        self._crafting = False
+                        self._screen = None
                         self.state = ScannerState.ACTIVE
                         self._update_status("active")
                         logger.info("INVENTORY detected - activating tooltip scanner")
                         if self.advisor is not None:
                             self.advisor.request_refresh()  # throttled
-                    elif self.advisor is not None and ocr.check_crafting():
-                        # Crafting popups need personal data (crafts to target)
+                    elif self.advisor is not None and (screen := ocr.check_screen()):
+                        # Crafting / trader popups need personal data (targets)
                         self._hotkey_override = False
-                        self._crafting = True
+                        self._screen = screen
                         self.state = ScannerState.ACTIVE
-                        self._update_status("active")
-                        logger.info("CRAFTING detected - activating panel scanner")
+                        self._update_status(f"active:{screen}")
+                        logger.info(f"{screen} detected - activating panel scanner")
                         self.advisor.request_refresh()  # throttled
                     else:
                         # Wait before next trigger scan
@@ -274,22 +274,22 @@ class Scanner:
                         if should_check_trigger:
                             self._last_trigger_check = now
                         if should_check_trigger and not (
-                            ocr.check_crafting()
-                            if self._crafting
+                            ocr.check_screen() == self._screen
+                            if self._screen
                             else ocr.check_trigger_any(
                                 [settings.trigger_region, settings.trigger_region2]
                             )
                         ):
-                            # Inventory / crafting closed, go back to idle
-                            screen = "CRAFTING" if self._crafting else "INVENTORY"
-                            self._crafting = False
+                            # Inventory / crafting / trader closed: back to idle
+                            screen = self._screen or "INVENTORY"
+                            self._screen = None
                             self.state = ScannerState.IDLE
                             self._update_status("scanning")
                             self._hide_overlay()
                             logger.info(f"{screen} closed - returning to idle")
                             continue
 
-                    if self._crafting:
+                    if self._screen:
                         self._show_panels(ocr.read_panel_names())
                         self.stats.tooltip_scans += 1
                         time.sleep(settings.scan.tooltip_scan_interval)
@@ -375,13 +375,13 @@ class Scanner:
         self._last_shown_item = item_name
         self._last_shown_time = current_time
 
-    def _show_panels(
-        self, panels: list[tuple[str, tuple[int, int, int, int]]]
-    ) -> None:
-        """Crafting screen: a crafts-to-target popup beside each panel."""
+    def _show_panels(self, panels: list[tuple[str, tuple[int, int, int, int]]]) -> None:
+        """Crafting / trader screen: a to-target popup beside each panel."""
         entries = []
         for name, bbox in panels:
-            res = self.advisor.lookup(name, crafting=True) if self.advisor else None
+            res = (
+                self.advisor.lookup(name, screen=self._screen) if self.advisor else None
+            )
             if res is not None:
                 entries.append((name, *res, bbox))
         if entries:
@@ -492,6 +492,8 @@ class Application:
             self.status.set_scanning()
         elif status == "active":
             self.status.set_active()
+        elif status.startswith("active:"):  # crafting / trader screen
+            self.status.set_active(status.removeprefix("active:"))
         elif status == "hotkey":
             self.status.set_hotkey()
         elif status == "error":
@@ -537,8 +539,7 @@ class Application:
                 (
                     ow
                     for ow in free
-                    if ow.placed_anchor is not None
-                    and _near(ow.placed_anchor, anchor)
+                    if ow.placed_anchor is not None and _near(ow.placed_anchor, anchor)
                 ),
                 None,
             )

@@ -40,6 +40,7 @@ from arc_helper.arctracker.snapshot import parse_progress
 from arc_helper.arctracker.snapshot import parse_tracking
 from arc_helper.arctracker.snapshot import save_snapshot
 from arc_helper.arctracker.verdict import Verdict
+from arc_helper.arctracker.verdict import buy_verdict_for
 from arc_helper.arctracker.verdict import craft_verdict_for
 from arc_helper.arctracker.verdict import unknown_verdict
 from arc_helper.arctracker.verdict import verdict_for
@@ -73,11 +74,14 @@ class _Live:
     plan: Plan
     # item id -> verdict; None marks a verdict_for that raised (logged once)
     verdicts: dict[str, Verdict | None] = field(default_factory=dict)
-    craft_verdicts: dict[str, Verdict | None] = field(default_factory=dict)
+    # screen header word -> item id -> verdict (crafting and trader screens)
+    screen_verdicts: dict[str, dict[str, Verdict | None]] = field(default_factory=dict)
     resolved: dict[str, str | None] = field(default_factory=dict)
 
 
 _UNKNOWN = unknown_verdict()
+# Screens with to-target popups, by the header word that identifies them
+SCREEN_VERDICTS = {"CRAFTING": craft_verdict_for, "TRADES": buy_verdict_for}
 
 
 def _mtime_ns(path: Path) -> int | None:
@@ -161,12 +165,13 @@ class AdvisorService:
     # -- scanner-thread API ------------------------------------------------
 
     def lookup(
-        self, ocr_name: str, *, crafting: bool = False
+        self, ocr_name: str, *, screen: str | None = None
     ) -> tuple[Verdict, str, bool] | None:
         """Verdict, age label and staleness; None without personal data.
 
-        ``crafting`` gives the crafting-screen verdict (crafts to the ideal
-        target) instead of the stash Keep/Sell/Recycle verdict.
+        ``screen`` is the open screen's header word: CRAFTING gives crafts to
+        the ideal target, TRADES the units to buy; None (the inventory) gives
+        the stash Keep/Sell/Recycle verdict.
 
         With personal data, a name the catalogue cannot resolve gets the
         Unknown verdict (never the generic database's fuzzy match).
@@ -187,8 +192,11 @@ class AdvisorService:
         if item_id is None:
             verdict = _UNKNOWN
         else:
-            memo = live.craft_verdicts if crafting else live.verdicts
-            decide = craft_verdict_for if crafting else verdict_for
+            if screen is None:
+                memo, decide = live.verdicts, verdict_for
+            else:
+                memo = live.screen_verdicts.setdefault(screen, {})
+                decide = SCREEN_VERDICTS[screen]
             verdict = memo.get(item_id, _MISSING)
             if verdict is _MISSING:
                 try:

@@ -481,12 +481,12 @@ def test_crafting_lookup_is_separate_from_stash_verdict(tmp_path):
     svc = _service(tmp_path, FakeClient())
     svc.step()
     stash, _, _ = svc.lookup("Light Gun Parts")
-    craft, _, _ = svc.lookup("Light Gun Parts", crafting=True)
+    craft, _, _ = svc.lookup("Light Gun Parts", screen="CRAFTING")
     assert craft.title.startswith(("Craft", "Target met", "No target"))
     assert stash.title != craft.title
     # memoised per mode: asking again does not swap them
     assert svc.lookup("Light Gun Parts")[0] is stash
-    assert svc.lookup("Light Gun Parts", crafting=True)[0] is craft
+    assert svc.lookup("Light Gun Parts", screen="CRAFTING")[0] is craft
 
 
 def test_connection_states(tmp_path):
@@ -528,3 +528,14 @@ def test_cached_snapshot_alone_is_not_online(tmp_path):
     save_snapshot(snap, tmp_path / "cache" / "snapshot.json")
     svc = _service(tmp_path, FakeClient())
     assert svc.connection() == "connecting"
+
+
+def test_trader_lookup_is_separate_from_crafting(tmp_path):
+    svc = _service(tmp_path, FakeClient(), cat=None)
+    svc.step()
+    craft = svc.lookup("Light Gun Parts", screen="CRAFTING")
+    buy = svc.lookup("Light Gun Parts", screen="TRADES")
+    assert craft is not None
+    assert buy is not None
+    assert buy[0] is svc.lookup("Light Gun Parts", screen="TRADES")[0]
+    assert buy[0].hint is None
