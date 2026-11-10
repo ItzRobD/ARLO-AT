@@ -778,8 +778,8 @@ class StatusWindow:
     def set_scanning(self) -> None:
         self.status_label.config(text="\u25cf Scanning...", fg="#888888")
 
-    def set_active(self) -> None:
-        self.status_label.config(text="\u25cf INVENTORY", fg="#32CD32")
+    def set_active(self, screen: str = "INVENTORY") -> None:
+        self.status_label.config(text=f"\u25cf {screen}", fg="#32CD32")
 
     def set_hotkey(self) -> None:
         self.status_label.config(text="\u25cf HOTKEY SCAN", fg="#FFD700")

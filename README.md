@@ -252,6 +252,8 @@ All settings live in the `.env` file. See [docs/CONFIGURATION.md](https://github
 
 **Debugging:** In `.env` set `DEBUG_MODE=true` for verbose logs and `SHOW_CAPTURE_AREA=true` to show the trigger and tooltip regions on screen. Restart ARLO after changing `.env`.
 
+**Log file:** ARLO always writes `arc_helper.log` next to the app (5 MB, two old copies kept), so connection problems can be looked up after a session even when it was started from Steam with no terminal. `DEBUG_MODE=true` adds debug detail.
+
 **Quitting:** If you started ARLO from a terminal, press **Ctrl+C**. You can also **right-click the status box** (the "Scanning…" / "ARLO Status" window) to quit, or run `pkill -f arc-helper` in a terminal.
 
 ## Personal Verdicts (ARC Tracker, optional)
@@ -295,6 +297,10 @@ When a workshop station's **CRAFTING** tab is open, ARLO adds a popup beside the
 - **No target:** nothing asks for this item.
 
 These popups need an ARC Tracker key. Counts come from ARC Tracker, so right after you craft they lag until its next sync.
+
+### Trader screen
+
+A trader's **TRADES** tab works the same way: popups beside the hovered item's tooltip and the selected item's panel, with the same targets as the crafting screen. The title is **Buy N** (single items, since traders sell one at a time) instead of **Craft N**. A trader's QUESTS tab also shows TRADES in its header, so hovering a quest reward there shows a popup too.
 
 **BP status unknown** on a popup means ARC Tracker's list of learned blueprints was cut off before reaching this item, so ARLO can't tell whether you've learned it. Its API returns at most 30 names.
 

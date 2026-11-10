@@ -102,6 +102,14 @@ def test_contains_crafting_word():
     assert not hit("", "CRAFTING")
 
 
+def test_screen_word():
+    word = OCREngine.screen_word
+    assert word("OS K K EXPLOSIVESSTATIONLEVEL CRAFTINGLEVELUP") == "CRAFTING"
+    assert word("APOLLO GRENADES & GADGETS TRADES QUESTS") == "TRADES"
+    assert word("INVENTORY INVENTORY LO") is None
+    assert word("UPGRADES") is None
+
+
 def test_tag_icon_junk_before_name_is_skipped():
     # Crafting hover tooltip for a quick-use gadget: the tag icon survives
     # preprocessing as a junk line ("arn" plain, "P" uppercase pass).

@@ -305,7 +305,21 @@ def verdict_for(plan: Plan, item_id: str) -> Verdict:
 
 
 def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
-    """Crafting-screen verdict: crafts still needed to reach the ideal target.
+    """Crafting-screen verdict: crafts still needed to reach the ideal target."""
+    return _to_target_verdict(plan, item_id, buying=False)
+
+
+def buy_verdict_for(plan: Plan, item_id: str) -> Verdict:
+    """Trader-screen verdict: units still needed to reach the ideal target.
+
+    Same target as the crafting screen, counted in single units (a trader
+    sells one at a time) and without blueprint hints.
+    """
+    return _to_target_verdict(plan, item_id, buying=True)
+
+
+def _to_target_verdict(plan: Plan, item_id: str, *, buying: bool) -> Verdict:
+    """What is still missing to reach the ideal target.
 
     The target is every ARC Tracker need for the item, plus its rules.yaml /
     loadout ideal, plus what other unmet targets still need of it as an
@@ -332,7 +346,8 @@ def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
         wanted = need_total + ideal + reserved
         urgent = sum(v for k, v in unmet.items() if plan.targets[k].state == "low")
         floor = need_total + minimum + urgent
-        crafts = math.ceil(max(0, wanted - have) / max(1, item.craft_quantity))
+        per = 1 if buying else max(1, item.craft_quantity)
+        crafts = math.ceil(max(0, wanted - have) / per)
 
     if wanted == 0:
         return Verdict(
@@ -352,7 +367,7 @@ def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
         default = "Reserve target" if ideal else "Crafting ingredient"
         reason = plan.rules.notes.get(item_id) or default
     counts = f"Own {have} · ideal {wanted}"
-    if item.craft_quantity > 1:
+    if item.craft_quantity > 1 and not buying:
         counts += f" · {TIMES}{item.craft_quantity} per craft"
 
     rows = _crafts(plan, item_id)
@@ -363,12 +378,12 @@ def craft_verdict_for(plan: Plan, item_id: str) -> Verdict:
     kind = VerdictKind.KEEP_LOW if have < floor else VerdictKind.KEEP_BUILDING
     return Verdict(
         kind,
-        f"Craft {crafts}",
+        f"{'Buy' if buying else 'Craft'} {crafts}",
         reason,
         counts,
         category,
         crafts=rows,
-        hint=_blueprint_note(plan, item),
+        hint=None if buying else _blueprint_note(plan, item),
     )
 
 

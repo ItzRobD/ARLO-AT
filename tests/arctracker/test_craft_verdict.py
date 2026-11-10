@@ -5,6 +5,7 @@ import pytest
 
 from arc_helper.arctracker.verdict import CraftRow
 from arc_helper.arctracker.verdict import VerdictKind
+from arc_helper.arctracker.verdict import buy_verdict_for
 from arc_helper.arctracker.verdict import craft_verdict_for
 from arc_helper.arctracker.verdict import verdict_for
 
@@ -194,3 +195,44 @@ def test_no_blueprint_marker_when_nothing_to_craft(plan):  # noqa: F811
         complete=False,
     )
     assert craft_verdict_for(p, "light_gun_parts").hint is None
+
+
+# --- Trader screen ----------------------------------------------------------
+
+
+def test_buy_counts_units_not_crafts(plan):  # noqa: F811
+    p = plan(owned={"light_ammo": 40}, rules="light_ammo: {target: 100}")
+    v = buy_verdict_for(p, "light_ammo")
+    assert (v.kind, v.title, v.counts) == (K.KEEP_LOW, "Buy 60", "Own 40 · ideal 100")
+
+
+def test_buy_has_no_blueprint_hint(plan):  # noqa: F811
+    p = plan(benches={"refiner": 3}, complete=False, **SHORT)
+    v = buy_verdict_for(p, "light_gun_parts")
+    assert (v.title, v.hint) == ("Buy 29", None)
+
+
+def test_buy_same_target_as_crafting(plan):  # noqa: F811
+    p = plan(
+        owned={"light_gun_parts": 48, "simple_gun_parts": 21},
+        rules=LIGHT_SHORT + "\nsimple_gun_parts: {target: 20}",
+    )
+    buy = buy_verdict_for(p, "simple_gun_parts")
+    craft = craft_verdict_for(p, "simple_gun_parts")
+    assert buy.title == "Buy 7"
+    assert (buy.reason, buy.counts, buy.crafts) == (
+        craft.reason,
+        craft.counts,
+        craft.crafts,
+    )
+
+
+@pytest.mark.parametrize(
+    ("owned", "title"), [({"light_gun_parts": 50}, "Target met"), ({}, "No target")]
+)
+def test_buy_met_and_no_target(plan, owned, title):  # noqa: F811
+    rules = LIGHT_SHORT if owned else ""
+    assert (
+        buy_verdict_for(plan(owned=owned, rules=rules), "light_gun_parts").title
+        == title
+    )
